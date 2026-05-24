@@ -1,0 +1,477 @@
+/*
+ * HyperLED - Open Source LED Controller
+ * 
+ * Copyright (c) 2026 Dennis Guse
+ * 
+ * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by 
+ * the European Commission - subsequent versions of the EUPL (the "Licence");
+ * You may not use this work except in compliance with the Licence.
+ * You may obtain a copy of the Licence at:
+ * 
+ * https://joinup.ec.europa.eu/software/page/eupl
+ * 
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the Licence is distributed on an "AS IS" basis,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the Licence for the specific language governing permissions and
+ * limitations under the Licence.
+ */
+#include "driver/gpio.h"
+#include <Arduino.h>
+#include "Config.h"
+#include "BusWrapper.h"
+#include <Preferences.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <HTTPUpdate.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+#include "HyperBus.h"
+#include "EspNowBus.h"
+
+// Hardware UART Pins for ESP32-C6
+#define UPLINK_RX 20
+#define UPLINK_TX 21
+#define DOWNLINK_RX 22
+#define DOWNLINK_TX 23
+
+// HyperBus Instances
+HyperBusClass busUp(Serial1);
+HyperBusClass busDown(Serial0);
+EspNowBusClass espBus;
+
+Preferences prefs;
+
+// Configuration state
+uint8_t myId = 254; // 254 = unconfigured slave
+uint8_t ledPin = 4;
+uint8_t ledPin2 = 255;
+uint8_t ledType = 22;
+uint16_t ledCount = 0;
+String slaveName = "New Slave";
+const String slaveVersion = SOFTWARE_VERSION;
+
+// LED Strip (dynamically allocated)
+IBus* strip = nullptr;
+
+// Pending OTA state
+bool pendingOta = false;
+String otaSsid = "";
+String otaPass = "";
+String otaUrl = "";
+
+void initLEDs() {
+    if (strip) {
+        delete strip;
+        strip = nullptr;
+    }
+    if (ledCount > 0 && ledPin != 255) {
+        switch (ledType) {
+            case TYPE_WS2812_RGB:
+                strip = new BusDigitalRgb<NeoGrbFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+            case TYPE_SK6812_RGBW:
+                strip = new BusDigitalRgbw<NeoGrbwFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+            case TYPE_TM1814:
+                strip = new BusDigitalRgbw<NeoWrgbTm1814Feature, Neo800KbpsMethod>(ledCount, ledPin); break;
+            case TYPE_400KHZ:
+                strip = new BusDigitalRgb<NeoGrbFeature, Neo400KbpsMethod>(ledCount, ledPin); break;
+            case TYPE_APA102:
+                strip = new BusDigitalSpiRgb<DotStarBgrFeature, DotStarSpiMethod>(ledCount, ledPin2, ledPin); break;
+            case TYPE_LPD8806:
+                strip = new BusDigitalSpiRgb<Lpd8806GrbFeature, Lpd8806SpiMethod>(ledCount, ledPin2, ledPin); break;
+            case TYPE_TM1829:
+            case TYPE_UCS8903:
+            case TYPE_APA106:
+            case TYPE_TM1914:
+            case TYPE_WS2811_W:
+            case TYPE_WS281X_WWA:
+                strip = new BusDigitalRgb<NeoGrbFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+            case TYPE_FW1906:
+            case TYPE_UCS8904:
+            case TYPE_WS2805:
+            case TYPE_SM16825:
+                strip = new BusDigitalRgbw<NeoGrbwFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+            case TYPE_WS2801:
+            case TYPE_LPD6803:
+            case TYPE_PP9813:
+                strip = new BusDigitalSpiRgb<DotStarBgrFeature, DotStarSpiMethod>(ledCount, ledPin2, ledPin); break;
+            case TYPE_ONOFF:
+                strip = new BusOnOff(ledCount, ledPin); break;
+            case TYPE_ANALOG_1CH:
+                strip = new BusPwm(ledCount, 1, ledPin); break;
+            case TYPE_ANALOG_2CH:
+                strip = new BusPwm(ledCount, 2, ledPin, ledPin2); break;
+            // 3, 4, 5 CH analog strips require more pins, but currently Slave UI only has pin and pin2.
+            // For now, map what we have.
+            case TYPE_ANALOG_3CH:
+                strip = new BusPwm(ledCount, 3, ledPin, ledPin2, 255); break;
+            case TYPE_ANALOG_4CH:
+                strip = new BusPwm(ledCount, 4, ledPin, ledPin2, 255, 255); break;
+            case TYPE_ANALOG_5CH:
+                strip = new BusPwm(ledCount, 5, ledPin, ledPin2, 255, 255, 255); break;
+            default:
+                strip = new BusDigitalRgb<NeoGrbFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+        }
+        
+        if (strip) {
+            strip->Begin();
+            strip->Show();
+        }
+    }
+}
+
+void loadConfig() {
+    prefs.begin("hyperled_slave", false);
+    myId = prefs.getUInt("id", 254);
+    ledPin = prefs.getUInt("pin", 4);
+    ledPin2 = prefs.getUInt("pin2", 255);
+    ledCount = prefs.getUInt("count", 0);
+    ledType = prefs.getUInt("type", 22);
+    slaveName = prefs.getString("name", "New Slave");
+    prefs.end();
+    
+    initLEDs();
+}
+
+void saveConfig() {
+    prefs.begin("hyperled_slave", false);
+    prefs.putUInt("id", myId);
+    prefs.putUInt("pin", ledPin);
+    prefs.putUInt("pin2", ledPin2);
+    prefs.putUInt("count", ledCount);
+    prefs.putUInt("type", ledType);
+    prefs.putString("name", slaveName);
+    prefs.end();
+}
+
+unsigned long lastUartPacket = 0;
+unsigned long wifiCandidateTime = 0;
+bool isUartSlave = false;
+uint8_t transportMode = 0;
+
+void performOtaUpdate() {
+    Serial.println("Starting WLAN-On-Demand Update...");
+    
+    // Disable UART to prevent HyperBus interrupts from crashing the update
+    Serial1.end();
+    Serial0.end();
+    
+    // Clear the LED strip to black just in case
+    if (strip) {
+        for(int i=0; i<ledCount; i++) strip->SetPixelColor(i,0,0,0,0);
+        strip->Show();
+        delete strip; // FREE MEMORY for SSL Handshake!
+        strip = nullptr;
+    }
+    
+    if (transportMode != 1) {
+        espBus.end();
+        delay(100);
+        WiFi.disconnect(true, true);
+        delay(100);
+    }
+    
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(otaSsid.c_str(), otaPass.c_str());
+    
+    int retries = 0;
+    while (WiFi.status() != WL_CONNECTED && retries < 40) {
+        delay(500);
+        Serial.print(".");
+        retries++;
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nWiFi connected! Downloading firmware...");
+        WiFiClientSecure client;
+        client.setInsecure();
+        
+        // Manually follow GitHub redirect to S3 to avoid httpUpdate bug
+        String finalUrl = otaUrl;
+        HTTPClient http;
+        http.begin(client, otaUrl);
+        const char* headerKeys[] = {"Location"};
+        http.collectHeaders(headerKeys, 1);
+        int httpCode = http.GET();
+        if (httpCode == HTTP_CODE_FOUND || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
+            String newUrl = http.header("Location");
+            if (newUrl.length() > 0) {
+                finalUrl = newUrl;
+                Serial.println("Redirected to: " + finalUrl);
+            }
+        }
+        http.end();
+        
+        httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+        t_httpUpdate_return ret = httpUpdate.update(client, finalUrl);
+        
+        switch (ret) {
+            case HTTP_UPDATE_FAILED:
+                Serial.printf("HTTP_UPDATE_FAILED Error (%d): %s\n", httpUpdate.getLastError(), httpUpdate.getLastErrorString().c_str());
+                break;
+            case HTTP_UPDATE_NO_UPDATES:
+                Serial.println("HTTP_UPDATE_NO_UPDATES");
+                break;
+            case HTTP_UPDATE_OK:
+                Serial.println("HTTP_UPDATE_OK");
+                break;
+        }
+    } else {
+        Serial.println("\nWiFi connection failed!");
+    }
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    Serial.println("OTA Failed. Rebooting in 2s...");
+    delay(2000);
+    ESP.restart();
+}
+
+void handleUplinkPacket(const HyperBusPacket& packet) {
+    if (!packet.isWireless) {
+        lastUartPacket = millis();
+        if (transportMode != 1) {
+            prefs.begin("hyperled_slave", false);
+            prefs.putUInt("transport", 1);
+            prefs.end();
+            Serial.println("UART Transport detected. Locking in and Rebooting...");
+            if (strip) { strip->SetPixelColor(0, 0, 255, 0, 0); strip->Show(); }
+            delay(500);
+            ESP.restart();
+        }
+    } else {
+        if (transportMode == 0) {
+            if (wifiCandidateTime == 0) {
+                wifiCandidateTime = millis();
+                Serial.println("Wi-Fi signal received. Waiting 3s to ensure no UART signal arrives...");
+            }
+        } else if (transportMode != 2) {
+            prefs.begin("hyperled_slave", false);
+            prefs.putUInt("transport", 2);
+            prefs.end();
+            Serial.println("Wi-Fi Transport detected. Locking in and Rebooting...");
+            delay(500);
+            ESP.restart();
+        }
+    }
+    
+    bool hasActiveUART = (transportMode == 1);
+
+    bool isForMe = (packet.targetId == myId || packet.targetId == HYPERBUS_BROADCAST_ID || (myId == 254 && packet.targetId == 254));
+    
+    // Process if it's for me
+    if (isForMe && packet.isValid) {
+        
+        if (packet.command == CMD_PING) {
+            // If we have an active UART connection, ignore ESP-NOW pings to avoid transport flapping!
+            if (hasActiveUART && packet.isWireless) return;
+            
+            // Reply with PONG. Random delay if unconfigured to avoid collisions on multidrop
+            delay(random(10, 50));
+            
+            // PONG Payload: [LED Count L] [LED Count H] [Version Length] [Version String...] [Name...]
+            uint8_t verLen = slaveVersion.length();
+            uint16_t len = 2 + 1 + verLen + slaveName.length();
+            uint8_t* payload = (uint8_t*)malloc(len);
+            payload[0] = ledCount & 0xFF;
+            payload[1] = (ledCount >> 8) & 0xFF;
+            payload[2] = verLen;
+            memcpy(&payload[3], slaveVersion.c_str(), verLen);
+            memcpy(&payload[3 + verLen], slaveName.c_str(), slaveName.length());
+            
+            if (packet.isWireless) espBus.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_PONG, payload, len);
+            else busUp.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_PONG, payload, len);
+            
+            free(payload);
+        }
+        else if (packet.command == CMD_SET_CONFIG) {
+            // Payload: [New ID] [LED Pin] [LED Pin 2] [LED Type] [LED Count L] [LED Count H] [Name...]
+            if (packet.length >= 6) {
+                myId = packet.payload[0];
+                ledPin = packet.payload[1];
+                ledPin2 = packet.payload[2];
+                ledType = packet.payload[3];
+                ledCount = packet.payload[4] | (packet.payload[5] << 8);
+                
+                if (packet.length > 6) {
+                    char nameBuf[64] = {0};
+                    int nameLen = min((int)(packet.length - 6), 63);
+                    memcpy(nameBuf, &packet.payload[6], nameLen);
+                    slaveName = String(nameBuf);
+                }
+                saveConfig();
+                initLEDs();
+            }
+        }
+        else if (packet.command == CMD_SET_LEDS) {
+            // Payload: RGBW array (4 bytes per pixel)
+            if (strip && packet.length >= 4) {
+                uint16_t maxLeds = min((int)ledCount, (int)(packet.length / 4));
+                for (uint16_t i = 0; i < maxLeds; i++) {
+                    uint8_t r = packet.payload[i * 4];
+                    uint8_t g = packet.payload[i * 4 + 1];
+                    uint8_t b = packet.payload[i * 4 + 2];
+                    uint8_t w = packet.payload[i * 4 + 3];
+                    strip->SetPixelColor(i, r, g, b, w);
+                }
+                strip->Show();
+            }
+        }
+        else if (packet.command == CMD_SET_LEDS_CHUNK) {
+            // Payload: [OffsetL] [OffsetH] [RGBW array]
+            if (strip && packet.length >= 6) {
+                uint16_t offset = packet.payload[0] | (packet.payload[1] << 8);
+                uint16_t maxLeds = min((int)(ledCount - offset), (int)((packet.length - 2) / 4));
+                for (uint16_t i = 0; i < maxLeds; i++) {
+                    uint8_t r = packet.payload[2 + i * 4];
+                    uint8_t g = packet.payload[2 + i * 4 + 1];
+                    uint8_t b = packet.payload[2 + i * 4 + 2];
+                    uint8_t w = packet.payload[2 + i * 4 + 3];
+                    strip->SetPixelColor(offset + i, r, g, b, w);
+                }
+                strip->Show();
+            }
+        }
+        else if (packet.command == CMD_TRIGGER_UPDATE) {
+            // Payload: JSON string with {"ssid":"...","pass":"...","url":"..."}
+            char jsonBuf[512] = {0};
+            int copyLen = min((int)packet.length, 511);
+            memcpy(jsonBuf, packet.payload, copyLen);
+            
+            JsonDocument doc;
+            DeserializationError err = deserializeJson(doc, jsonBuf);
+            if (!err) {
+                otaSsid = doc["ssid"].as<String>();
+                otaPass = doc["pass"].as<String>();
+                otaUrl = doc["url"].as<String>();
+                
+                if (otaSsid.length() > 0 && otaUrl.length() > 0) {
+                    pendingOta = true;
+                }
+            }
+        }
+    }
+    
+    // Forward to Downlink if not exclusively for me
+    // Broadcasts (255) and unconfigured (254) should be forwarded so other slaves can hear them
+    if (packet.targetId != myId || packet.targetId == HYPERBUS_BROADCAST_ID || packet.targetId == 254) {
+        if (!packet.isWireless) busDown.sendPacket(packet.targetId, packet.senderId, packet.command, packet.payload, packet.length);
+    }
+}
+
+void handleDownlinkPacket(const HyperBusPacket& packet) {
+    // Anything received from Downlink is forwarded to Uplink (Master)
+    // We do NOT process packets from Downlink because the Master sends commands from Uplink.
+    // The only thing on Downlink is responses from downstream slaves.
+    busUp.sendPacket(packet.targetId, packet.senderId, packet.command, packet.payload, packet.length);
+}
+
+void setup() {
+    // We don't use Serial (USB) so we don't break pins if they overlap, but UART0 and UART1 are safe.
+    Serial.begin(115200); // Debug output over USB CDC
+    Serial.println("HyperLED Slave Booting...");
+    
+    loadConfig();
+    
+    // Start UART Buses
+    busUp.begin(115200, UPLINK_RX, UPLINK_TX);
+    gpio_pullup_en((gpio_num_t)UPLINK_RX);
+    
+    busDown.begin(115200, DOWNLINK_RX, DOWNLINK_TX);
+    gpio_pullup_en((gpio_num_t)DOWNLINK_RX);
+    
+    busUp.setCallback(handleUplinkPacket);
+    busDown.setCallback(handleDownlinkPacket);
+    
+    prefs.begin("hyperled_slave", false);
+    transportMode = prefs.getUInt("transport", 0);
+    if (prefs.getUInt("nvs_reset_v2", 0) == 0) {
+        prefs.putUInt("transport", 0);
+        transportMode = 0;
+        prefs.putUInt("nvs_reset_v2", 1);
+        Serial.println("Forced NVS Reset to Auto-Sense mode!");
+    }
+    prefs.end();
+    
+    if (transportMode == 1) {
+        Serial.println("Locked to UART Transport");
+        isUartSlave = true;
+    } else if (transportMode == 2) {
+        Serial.println("Locked to Wi-Fi Transport");
+        espBus.begin(WIFI_STA, true);
+        espBus.setCallback(handleUplinkPacket);
+    } else {
+        Serial.println("Auto-Sensing Transport...");
+        espBus.begin(WIFI_STA, true);
+        espBus.setCallback(handleUplinkPacket);
+    }
+    
+    Serial.println("Slave Ready.");
+}
+
+void loop() {
+    if (pendingOta) {
+        pendingOta = false;
+        performOtaUpdate();
+    }
+    
+    busUp.loop();
+    busDown.loop();
+    if (transportMode != 1) espBus.loop();
+
+    if (transportMode == 0 && wifiCandidateTime > 0 && millis() - wifiCandidateTime > 3000) {
+        prefs.begin("hyperled_slave", false);
+        prefs.putUInt("transport", 2);
+        prefs.end();
+        Serial.println("UART timeout. Locking Wi-Fi Transport and Rebooting...");
+        delay(500);
+        ESP.restart();
+    }
+    
+    // Auto-Revert if locked transport is dead for 30 seconds after boot
+    static unsigned long bootTime = millis();
+    if (millis() - bootTime > 30000) {
+        if (transportMode == 1 && lastUartPacket == 0) {
+            prefs.begin("hyperled_slave", false);
+            prefs.putUInt("transport", 0);
+            prefs.end();
+            Serial.println("UART timeout. Reverting to Auto-Sense...");
+            ESP.restart();
+        }
+    }
+    
+    // Hardware Lockup Recovery
+    if (transportMode == 1 && lastUartPacket > 0 && millis() - lastUartPacket > 2000) {
+        Serial.println("UART Hardware Lockup detected! Restarting peripheral...");
+        busUp.begin(115200, UPLINK_RX, UPLINK_TX);
+        gpio_pullup_en((gpio_num_t)UPLINK_RX); // MUST set pullup AFTER begin!
+        lastUartPacket = millis(); // Reset timer to give it time to recover
+        
+        // VISUAL DEBUG: Flash first LED Red to indicate UART lockup recovery
+        if (strip) {
+            strip->SetPixelColor(0, 255, 0, 0, 0);
+            strip->Show();
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
