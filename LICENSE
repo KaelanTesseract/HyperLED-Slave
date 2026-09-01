@@ -193,8 +193,8 @@ All other changes or additions to this Appendix require the production of a new 
 --------------------------------------------------------------------------------
 
 THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
-This project incorporates components from the projects listed below. 
-The original copyright notices and the licenses under which these 
+This project incorporates components from the projects listed below.
+The original copyright notices and the licenses under which these
 components are distributed are respected and acknowledged.
 
 1. ArduinoJson
@@ -205,30 +205,12 @@ components are distributed are respected and acknowledged.
    Copyright (c) 2020 Michael C. Miller (makuna)
    License: GNU Lesser General Public License v3.0 (LGPL-3.0)
 
-3. ESPAsyncWebServer & AsyncTCP (mathieucarbou forks)
-   Copyright (c) 2024 Mathieu Carbou
-   Original Copyright (c) 2018 Hristo Gochkov (me-no-dev)
-   License: GNU Lesser General Public License v3.0 (LGPL-3.0)
-
-4. PubSubClient
-   Copyright (c) 2008-2020 Nick O'Leary
-   License: MIT License (https://opensource.org/licenses/MIT)
-
-5. ESP32 Arduino Core
+3. ESP32 Arduino Core
    Copyright (c) 2015-2024 Espressif Systems
    License: GNU Lesser General Public License v2.1 (LGPL-2.1)
 
-6. WLED
-   This project was inspired by and contains concepts/API structures similar to WLED.
-   Copyright (c) 2016-2024 Christian Schwinne
+4. esp-hub75
+   Copyright (c) 2025 Stuart Parmenter
    License: MIT License (https://opensource.org/licenses/MIT)
-
-7. iro.js
-   Copyright (c) 2016-2024 James Daniel
-   License: Mozilla Public License 2.0 (MPL-2.0)
-   Source: https://github.com/jaames/iro.js
-
-8. LittleFS
-   Copyright (c) 2017, Arm Limited. All rights reserved.
-   License: BSD 3-Clause License
+   Source: https://github.com/esphome-libs/esp-hub75
 
