@@ -1,1 +1,7 @@
 .pio
+
+# PlatformIO-generated IDE database - machine-specific, regenerates automatically.
+compile_commands.json
+
+.vscode/c_cpp_properties.json
+.vscode/launch.json

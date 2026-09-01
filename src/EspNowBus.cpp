@@ -3,7 +3,7 @@
  * 
  * Copyright (c) 2026 Dennis Guse
  * 
- * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by 
+ * Licensed under the EUPL, Version 1.2 or â€“ as soon they will be approved by 
  * the European Commission - subsequent versions of the EUPL (the "Licence");
  * You may not use this work except in compliance with the Licence.
  * You may obtain a copy of the Licence at:
@@ -66,7 +66,7 @@ void EspNowBusClass::loop() {
         if (millis() - _lastPingReceived > 500) {
             _currentChannel++;
             if (_currentChannel > 13) _currentChannel = 1;
-            
+
             esp_wifi_set_channel(_currentChannel, WIFI_SECOND_CHAN_NONE);
             _lastPingReceived = millis(); // Reset timer for next hop
         }
@@ -74,23 +74,23 @@ void EspNowBusClass::loop() {
 }
 
 bool EspNowBusClass::sendPacket(uint8_t targetId, uint8_t senderId, uint8_t command, const uint8_t* payload, uint16_t length) {
+    uint8_t* targetMac = _broadcastAddress;
+    if (targetId != HYPERBUS_BROADCAST_ID && targetId != 254 && _peerMacs.find(targetId) != _peerMacs.end()) {
+        targetMac = _peerMacs[targetId].data();
+    }
     if (length <= 240) {
         // Fits in a single packet
         uint16_t packetLen = 4 + length;
-        uint8_t* buf = (uint8_t*)malloc(packetLen);
-        if (!buf) return false;
-        
-        buf[0] = targetId;
-        buf[1] = senderId;
-        buf[2] = command;
-        buf[3] = (uint8_t)length; // max 240, fits in 1 byte for espnow wrappers
-        
+        _txBuffer[0] = targetId;
+        _txBuffer[1] = senderId;
+        _txBuffer[2] = command;
+        _txBuffer[3] = (uint8_t)length; // max 240, fits in 1 byte for espnow wrappers
+
         if (length > 0 && payload != nullptr) {
-            memcpy(&buf[4], payload, length);
+            memcpy(&_txBuffer[4], payload, length);
         }
-        
-        esp_err_t result = esp_now_send(_broadcastAddress, buf, packetLen);
-        free(buf);
+
+        esp_err_t result = esp_now_send(targetMac, _txBuffer, packetLen);
         return (result == ESP_OK);
     } else if (command == CMD_SET_LEDS) {
         // Chunking for CMD_SET_LEDS
@@ -98,28 +98,26 @@ bool EspNowBusClass::sendPacket(uint8_t targetId, uint8_t senderId, uint8_t comm
         while (offset < length) {
             uint16_t chunkSize = length - offset;
             if (chunkSize > 240) chunkSize = 240;
-            
+
             uint16_t packetLen = 6 + chunkSize; // target, sender, cmd, len, offsetL, offsetH
-            uint8_t* buf = (uint8_t*)malloc(packetLen);
-            if (!buf) return false;
-            
-            buf[0] = targetId;
-            buf[1] = senderId;
-            buf[2] = CMD_SET_LEDS_CHUNK;
-            buf[3] = (uint8_t)chunkSize;
-            buf[4] = offset & 0xFF;
-            buf[5] = (offset >> 8) & 0xFF;
-            
-            memcpy(&buf[6], &payload[offset], chunkSize);
-            
-            esp_now_send(_broadcastAddress, buf, packetLen);
-            free(buf);
-            
+            _txBuffer[0] = targetId;
+            _txBuffer[1] = senderId;
+            _txBuffer[2] = CMD_SET_LEDS_CHUNK;
+            _txBuffer[3] = (uint8_t)chunkSize;
+            _txBuffer[4] = offset & 0xFF;
+            _txBuffer[5] = (offset >> 8) & 0xFF;
+
+            memcpy(&_txBuffer[6], &payload[offset], chunkSize);
+
+            esp_now_send(targetMac, _txBuffer, packetLen);
+
             offset += chunkSize;
             delayMicroseconds(500); // Give ESP-NOW some breathing room
         }
         return true;
     }
+
+    Serial.printf("EspNowBus: dropped %u-byte packet for cmd 0x%02X (target %u) - exceeds the 240-byte single-packet limit and chunking is only implemented for CMD_SET_LEDS\n", length, command, targetId);
     return false;
 }
 
@@ -131,7 +129,24 @@ void EspNowBusClass::onDataRecv(const esp_now_recv_info_t * esp_now_info, const 
     packet.senderId = incomingData[1];
     packet.command = incomingData[2];
     uint8_t payloadLen = incomingData[3];
-    
+
+    // Register sender MAC for Unicast if we haven't already
+    if (_instance->_peerMacs.find(packet.senderId) == _instance->_peerMacs.end()) {
+        std::array<uint8_t, 6> mac;
+        memcpy(mac.data(), esp_now_info->src_addr, 6);
+        _instance->_peerMacs[packet.senderId] = mac;
+
+        // Add peer to ESP-NOW
+        if (!esp_now_is_peer_exist(mac.data())) {
+            esp_now_peer_info_t peerInfo;
+            memset(&peerInfo, 0, sizeof(peerInfo));
+            memcpy(peerInfo.peer_addr, mac.data(), 6);
+            peerInfo.channel = 0;
+            peerInfo.encrypt = false;
+            esp_now_add_peer(&peerInfo);
+        }
+    }
+
     if (len < 4 + payloadLen) return; // Incomplete
     
     packet.length = payloadLen;
@@ -151,7 +166,7 @@ void EspNowBusClass::onDataRecv(const esp_now_recv_info_t * esp_now_info, const 
         _instance->_locked = true;
         _instance->_lastPingReceived = millis();
     }
-    
+
     _instance->_callback(packet);
 }
 

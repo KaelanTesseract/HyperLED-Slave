@@ -3,7 +3,7 @@
  * 
  * Copyright (c) 2026 Dennis Guse
  * 
- * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by 
+ * Licensed under the EUPL, Version 1.2 or â€“ as soon they will be approved by 
  * the European Commission - subsequent versions of the EUPL (the "Licence");
  * You may not use this work except in compliance with the Licence.
  * You may obtain a copy of the Licence at:
@@ -24,6 +24,8 @@
 #include <esp_wifi.h>
 #include <esp_now.h>
 #include "HyperBus.h" // For BusInterface and HyperBusPacket
+#include <map>
+#include <array>
 
 class EspNowBusClass : public BusInterface {
 public:
@@ -49,6 +51,10 @@ private:
     bool _locked = false;
     
     uint8_t _broadcastAddress[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    std::map<uint8_t, std::array<uint8_t, 6>> _peerMacs;
+
+    static const uint16_t TX_BUFFER_SIZE = 250; // Covers header(6) + max chunk(240) with headroom, ESP-NOW payload cap is 250
+    uint8_t _txBuffer[TX_BUFFER_SIZE];
 };
 
 #endif

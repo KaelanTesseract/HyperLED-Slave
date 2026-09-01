@@ -3,7 +3,7 @@
  * 
  * Copyright (c) 2026 Dennis Guse
  * 
- * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by 
+ * Licensed under the EUPL, Version 1.2 or â€“ as soon they will be approved by 
  * the European Commission - subsequent versions of the EUPL (the "Licence");
  * You may not use this work except in compliance with the Licence.
  * You may obtain a copy of the Licence at:
@@ -81,13 +81,14 @@ private:
     uint8_t _headerBuffer[5];
     uint8_t _headerIndex = 0;
     
-    uint8_t* _payloadBuffer = nullptr;
+    static const uint16_t MAX_PAYLOAD_SIZE = 1024;
+    uint8_t _payloadBuffer[MAX_PAYLOAD_SIZE];
     uint16_t _payloadIndex = 0;
-    
+
     uint8_t _crcBuffer[2];
     uint8_t _crcIndex = 0;
-    
-    uint16_t calculateCRC16(const uint8_t* data, uint16_t length);
+
+    uint16_t calculateCRC16(const uint8_t* data, uint16_t length, uint16_t crc = 0xFFFF);
     void resetReceiver();
     void processReceivedPacket();
 };

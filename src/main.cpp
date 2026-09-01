@@ -1,9 +1,9 @@
-/*
+﻿/*
  * HyperLED - Open Source LED Controller
  * 
  * Copyright (c) 2026 Dennis Guse
  * 
- * Licensed under the EUPL, Version 1.2 or � as soon they will be approved by 
+ * Licensed under the EUPL, Version 1.2 or – as soon they will be approved by 
  * the European Commission - subsequent versions of the EUPL (the "Licence");
  * You may not use this work except in compliance with the Licence.
  * You may obtain a copy of the Licence at:
@@ -29,11 +29,13 @@
 #include "HyperBus.h"
 #include "EspNowBus.h"
 
-// Hardware UART Pins for ESP32-C6
-#define UPLINK_RX 20
-#define UPLINK_TX 21
-#define DOWNLINK_RX 22
-#define DOWNLINK_TX 23
+// Hardware UART Pins for the Waveshare ESP32-S3-Zero. UPLINK cross-wires to
+// the Master's own GPIO16/17 pair (see include/Config.h in the root project);
+// DOWNLINK is free for daisy-chaining a further Slave.
+#define UPLINK_RX 16
+#define UPLINK_TX 17
+#define DOWNLINK_RX 18
+#define DOWNLINK_TX 38
 
 // HyperBus Instances
 HyperBusClass busUp(Serial1);
@@ -48,6 +50,9 @@ uint8_t ledPin = 4;
 uint8_t ledPin2 = 255;
 uint8_t ledType = 22;
 uint16_t ledCount = 0;
+uint16_t matrixWidth = 16;  // TYPE_HUB75 only
+uint16_t matrixHeight = 16; // TYPE_HUB75 only
+uint8_t hub75ShiftDriver = 0; // TYPE_HUB75 only - same Hub75ShiftDriver enum order as the Master
 String slaveName = "New Slave";
 const String slaveVersion = SOFTWARE_VERSION;
 
@@ -65,8 +70,13 @@ void initLEDs() {
         delete strip;
         strip = nullptr;
     }
-    if (ledCount > 0 && ledPin != 255) {
+    if ((ledCount > 0 && ledPin != 255) || ledType == TYPE_HUB75) {
         switch (ledType) {
+            case TYPE_HUB75:
+                // Fixed 14-pin wiring (Config.h) instead of ledPin/ledPin2; matrixWidth x
+                // matrixHeight instead of ledCount (kept in sync with ledCount by the
+                // CMD_SET_CONFIG handler below, so CMD_SET_LEDS's bounds-check still works).
+                strip = new BusHub75(matrixWidth, matrixHeight, (Hub75ShiftDriver)hub75ShiftDriver); break;
             case TYPE_WS2812_RGB:
                 strip = new BusDigitalRgb<NeoGrbFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
             case TYPE_SK6812_RGBW:
@@ -79,22 +89,31 @@ void initLEDs() {
                 strip = new BusDigitalSpiRgb<DotStarBgrFeature, DotStarSpiMethod>(ledCount, ledPin2, ledPin); break;
             case TYPE_LPD8806:
                 strip = new BusDigitalSpiRgb<Lpd8806GrbFeature, Lpd8806SpiMethod>(ledCount, ledPin2, ledPin); break;
+            case TYPE_TM1914:
+                // TM1914 requires a chip-specific mode-select settings header before the pixel
+                // data (handled by NeoGrbTm1914Feature) - a plain NeoGrbFeature frame omits it.
+                strip = new BusDigitalRgb<NeoGrbTm1914Feature, Neo800KbpsMethod>(ledCount, ledPin); break;
             case TYPE_TM1829:
             case TYPE_UCS8903:
             case TYPE_APA106:
-            case TYPE_TM1914:
             case TYPE_WS2811_W:
             case TYPE_WS281X_WWA:
                 strip = new BusDigitalRgb<NeoGrbFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
             case TYPE_FW1906:
-            case TYPE_UCS8904:
-            case TYPE_WS2805:
-            case TYPE_SM16825:
-                strip = new BusDigitalRgbw<NeoGrbwFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+              case TYPE_UCS8904:
+                  strip = new BusDigitalRgbw<NeoGrbwFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+              case TYPE_WS2805:
+              case TYPE_SM16825:
+                  strip = new BusDigitalRgbww<NeoGrbwcFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
             case TYPE_WS2801:
+                // WS2801 is plain RGB-over-SPI with no start/end frame - NOT DotStar-protocol-compatible.
+                strip = new BusDigitalSpiRgb<NeoRgbFeature, Ws2801SpiMethod>(ledCount, ledPin2, ledPin); break;
             case TYPE_LPD6803:
+                // LPD6803 uses 16-bit 5-5-5 words with a 1-start-bit marker per pixel - NOT DotStar-protocol-compatible.
+                strip = new BusDigitalSpiRgb<Lpd6803RgbFeature, Lpd6803SpiMethod>(ledCount, ledPin2, ledPin); break;
             case TYPE_PP9813:
-                strip = new BusDigitalSpiRgb<DotStarBgrFeature, DotStarSpiMethod>(ledCount, ledPin2, ledPin); break;
+                // P9813 has its own checksum-byte framing per pixel - NOT DotStar-protocol-compatible.
+                strip = new BusDigitalSpiRgb<P9813BgrFeature, P9813SpiMethod>(ledCount, ledPin2, ledPin); break;
             case TYPE_ONOFF:
                 strip = new BusOnOff(ledCount, ledPin); break;
             case TYPE_ANALOG_1CH:
@@ -127,9 +146,12 @@ void loadConfig() {
     ledPin2 = prefs.getUInt("pin2", 255);
     ledCount = prefs.getUInt("count", 0);
     ledType = prefs.getUInt("type", 22);
+    matrixWidth = prefs.getUInt("matW", 16);
+    matrixHeight = prefs.getUInt("matH", 16);
+    hub75ShiftDriver = prefs.getUInt("h75sd", 0);
     slaveName = prefs.getString("name", "New Slave");
     prefs.end();
-    
+
     initLEDs();
 }
 
@@ -140,6 +162,9 @@ void saveConfig() {
     prefs.putUInt("pin2", ledPin2);
     prefs.putUInt("count", ledCount);
     prefs.putUInt("type", ledType);
+    prefs.putUInt("matW", matrixWidth);
+    prefs.putUInt("matH", matrixHeight);
+    prefs.putUInt("h75sd", hub75ShiftDriver);
     prefs.putString("name", slaveName);
     prefs.end();
 }
@@ -284,18 +309,23 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
             free(payload);
         }
         else if (packet.command == CMD_SET_CONFIG) {
-            // Payload: [New ID] [LED Pin] [LED Pin 2] [LED Type] [LED Count L] [LED Count H] [Name...]
-            if (packet.length >= 6) {
+            // Payload: [New ID] [LED Pin] [LED Pin 2] [LED Type] [LED Count L] [LED Count H]
+            //          [Matrix Width L] [Matrix Width H] [Matrix Height L] [Matrix Height H]
+            //          [HUB75 Shift Driver] [Name...]
+            if (packet.length >= 11) {
                 myId = packet.payload[0];
                 ledPin = packet.payload[1];
                 ledPin2 = packet.payload[2];
                 ledType = packet.payload[3];
                 ledCount = packet.payload[4] | (packet.payload[5] << 8);
-                
-                if (packet.length > 6) {
+                matrixWidth = packet.payload[6] | (packet.payload[7] << 8);
+                matrixHeight = packet.payload[8] | (packet.payload[9] << 8);
+                hub75ShiftDriver = packet.payload[10];
+
+                if (packet.length > 11) {
                     char nameBuf[64] = {0};
-                    int nameLen = min((int)(packet.length - 6), 63);
-                    memcpy(nameBuf, &packet.payload[6], nameLen);
+                    int nameLen = min((int)(packet.length - 11), 63);
+                    memcpy(nameBuf, &packet.payload[11], nameLen);
                     slaveName = String(nameBuf);
                 }
                 saveConfig();
@@ -303,34 +333,36 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
             }
         }
         else if (packet.command == CMD_SET_LEDS) {
-            // Payload: RGBW array (4 bytes per pixel)
-            if (strip && packet.length >= 4) {
-                uint16_t maxLeds = min((int)ledCount, (int)(packet.length / 4));
-                for (uint16_t i = 0; i < maxLeds; i++) {
-                    uint8_t r = packet.payload[i * 4];
-                    uint8_t g = packet.payload[i * 4 + 1];
-                    uint8_t b = packet.payload[i * 4 + 2];
-                    uint8_t w = packet.payload[i * 4 + 3];
-                    strip->SetPixelColor(i, r, g, b, w);
-                }
-                strip->Show();
-            }
-        }
+              // Payload: RGBW array (5 bytes per pixel)
+              if (strip && packet.length >= 5) {
+                  uint16_t maxLeds = min((int)ledCount, (int)(packet.length / 5));
+                  for (uint16_t i = 0; i < maxLeds; i++) {
+                      uint8_t r = packet.payload[i * 5];
+                      uint8_t g = packet.payload[i * 5 + 1];
+                      uint8_t b = packet.payload[i * 5 + 2];
+                      uint8_t w = packet.payload[i * 5 + 3];
+                      uint8_t w2 = packet.payload[i * 5 + 4];
+                      strip->SetPixelColor(i, r, g, b, w, w2);
+                  }
+                  strip->Show();
+              }
+          }
         else if (packet.command == CMD_SET_LEDS_CHUNK) {
-            // Payload: [OffsetL] [OffsetH] [RGBW array]
-            if (strip && packet.length >= 6) {
-                uint16_t offset = packet.payload[0] | (packet.payload[1] << 8);
-                uint16_t maxLeds = min((int)(ledCount - offset), (int)((packet.length - 2) / 4));
-                for (uint16_t i = 0; i < maxLeds; i++) {
-                    uint8_t r = packet.payload[2 + i * 4];
-                    uint8_t g = packet.payload[2 + i * 4 + 1];
-                    uint8_t b = packet.payload[2 + i * 4 + 2];
-                    uint8_t w = packet.payload[2 + i * 4 + 3];
-                    strip->SetPixelColor(offset + i, r, g, b, w);
-                }
-                strip->Show();
-            }
-        }
+              // Payload: [OffsetL] [OffsetH] [RGBW array]
+              if (strip && packet.length >= 7) {
+                  uint16_t offset = packet.payload[0] | (packet.payload[1] << 8);
+                  uint16_t maxLeds = min((int)(ledCount - offset), (int)((packet.length - 2) / 5));
+                  for (uint16_t i = 0; i < maxLeds; i++) {
+                      uint8_t r = packet.payload[2 + i * 5];
+                      uint8_t g = packet.payload[2 + i * 5 + 1];
+                      uint8_t b = packet.payload[2 + i * 5 + 2];
+                      uint8_t w = packet.payload[2 + i * 5 + 3];
+                      uint8_t w2 = packet.payload[2 + i * 5 + 4];
+                      strip->SetPixelColor(offset + i, r, g, b, w, w2);
+                  }
+                  strip->Show();
+              }
+          }
         else if (packet.command == CMD_TRIGGER_UPDATE) {
             // Payload: JSON string with {"ssid":"...","pass":"...","url":"..."}
             char jsonBuf[512] = {0};
@@ -445,14 +477,9 @@ void loop() {
         busUp.begin(115200, UPLINK_RX, UPLINK_TX);
         gpio_pullup_en((gpio_num_t)UPLINK_RX); // MUST set pullup AFTER begin!
         lastUartPacket = millis(); // Reset timer to give it time to recover
-        
-        // VISUAL DEBUG: Flash first LED Red to indicate UART lockup recovery
-        if (strip) {
-            strip->SetPixelColor(0, 255, 0, 0, 0);
-            strip->Show();
-        }
     }
 }
+
 
 
 
