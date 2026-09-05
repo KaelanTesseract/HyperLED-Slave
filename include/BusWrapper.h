@@ -197,7 +197,7 @@ public:
         config.panel_width = width;
         config.panel_height = height;
         config.shift_driver = shiftDriver;
-        // Single-buffered: internal RAM is still limited (see the OVERHEAD_FACTOR comment
+        // Single-buffered: internal RAM is still limited (see the sizing comment
         // below), and even a single frame buffer can already be substantial for larger
         // panels/bit depths (double buffering would need twice as much).
         config.double_buffer = false;
@@ -210,36 +210,38 @@ public:
         _driver = new Hub75Driver(config);
     }
     ~BusHub75() { delete _driver; }
-    // begin() can crash (not just return false) when the DMA buffer for the requested
-    // panel/bit-depth doesn't fit in RAM - a bug in the esp-hub75 library that a return-value
-    // check can't guard against on its own, since the fault can happen before begin() gets a
-    // chance to return. So estimate the buffer size ourselves first and refuse to call begin()
-    // at all unless there is a healthy safety margin of free DMA-capable RAM, keeping the device
-    // bootable even when a panel is configured too large for the ESP32-S3's ~512KB internal RAM
-    // (the GDMA backend this chip uses doesn't route HUB75 buffers into the 2MB PSRAM, so PSRAM
-    // doesn't currently help here).
+    // begin() can crash (not just return false) when the DMA buffers for the requested
+    // panel/bit-depth don't fit in RAM, so estimate the cost first and refuse to call it at all
+    // unless there is a healthy margin of free DMA-capable internal RAM. That keeps the device
+    // bootable when a panel is configured too large for the ESP32-S3's ~512KB of internal RAM
+    // (the GDMA backend this chip uses allocates with MALLOC_CAP_DMA, so the 2MB PSRAM cannot
+    // take these buffers).
     //
-    // The estimate below (num_rows * bit_depth * dma_width * 2 bytes) is only the BASE cost -
-    // the library's real allocation also includes per-bit-plane BCM padding for grayscale, which
-    // grows roughly as 2^(bit_depth-1) (not linearly with bit_depth like the base estimate does),
-    // so the overhead ratio itself grows with HUB75_BIT_DEPTH (set via build_flags, see
-    // platformio.ini). Measured on real hardware at the default 8-bit depth for a 64x64 panel:
-    // base estimate 32768 bytes, actual requirement 549376 bytes (~16.8x, matching 2^7/8=16) -
-    // that measurement was taken on the older ESP32-C6/PARLIO backend, not yet re-verified on
-    // this chip's GDMA backend, so treat it as a reasonable starting estimate rather than exact.
-    // OVERHEAD_FACTOR reconstructs that same ratio for whatever bit depth is configured, with a
-    // +30% and +2 margin on top since exact padding also depends on an auto-tuned internal
-    // parameter (lsbMsbTransitionBit) this code doesn't have access to.
-    static constexpr size_t OVERHEAD_FACTOR =
-        (((size_t(1) << (HUB75_BIT_DEPTH - 1)) * 13) / (HUB75_BIT_DEPTH * 10)) + 2;
+    // The GDMA backend allocates exactly two things: the row buffers
+    // (num_rows * width * bit_depth * 2 bytes) and one descriptor chain. BCM lives in that chain
+    // - the higher bit planes are repeated by re-linking descriptors, not by duplicating pixel
+    // data - so the worst case is lsbMsbTransitionBit = 0 with 2^(bit_depth-1) transmissions per
+    // row. A 64x64 panel at 6 bits therefore costs about 24KB + 12KB.
+    //
+    // An earlier version of this estimate multiplied the buffer by up to ~22x. That factor was
+    // measured on the ESP32-C6/PARLIO backend, which pads the buffer itself, and does not apply
+    // to GDMA - it made this guard reject panel sizes that run comfortably.
+    static constexpr size_t DMA_DESCRIPTOR_BYTES = 12; // sizeof(dma_descriptor_t) on the ESP32-S3
     void Begin() override {
         size_t numRows = (_height + 1) / 2; // standard 1/2 scan (matches get_effective_num_rows default)
-        size_t estimatedMinBytes = numRows * HUB75_BIT_DEPTH * _width * sizeof(uint16_t);
+        size_t bufferBytes = numRows * _width * HUB75_BIT_DEPTH * sizeof(uint16_t);
+        size_t descriptorBytes = numRows * (size_t(1) << (HUB75_BIT_DEPTH - 1)) * DMA_DESCRIPTOR_BYTES;
+        size_t needed = bufferBytes + descriptorBytes;
+        // Half again plus 8KB of headroom: the allocation must not succeed at the cost of leaving
+        // the rest of the firmware - the WiFi stack above all - without internal RAM.
+        size_t required = needed + needed / 2 + 8192;
         size_t freeDmaHeap = heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-        if (estimatedMinBytes * OVERHEAD_FACTOR > freeDmaHeap) {
-            Serial.printf("BusHub75: panel %dx%d likely needs more DMA RAM than the %u bytes free - "
-                          "refusing to init (would crash). Choose a smaller panel size.\n",
-                          _width, _height, (unsigned)freeDmaHeap);
+        Serial.printf("BusHub75: panel %dx%d at %d bits needs ~%u bytes of DMA RAM (%u free)\n",
+                      _width, _height, (int)HUB75_BIT_DEPTH, (unsigned)needed, (unsigned)freeDmaHeap);
+        if (required > freeDmaHeap) {
+            Serial.printf("BusHub75: refusing to init - %u bytes required including margin, only %u free. "
+                          "Reduce HUB75_BIT_DEPTH or the panel size.\n",
+                          (unsigned)required, (unsigned)freeDmaHeap);
             _ready = false;
             return;
         }
