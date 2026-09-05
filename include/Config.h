@@ -107,6 +107,19 @@
 #define HUB75_PIN_LAT 14
 #define HUB75_PIN_OE 15
 
+// Onboard WS2812 status LED of the Waveshare ESP32-S3-Zero. Driven by StatusLedManager
+// through NeoPixelBus on RMT channel 0 (the main LED bus uses channel 1), NOT through the
+// Arduino core's rgbLedWrite(): that path is disabled via ESP32_ARDUINO_NO_RGB_BUILTIN
+// because it pulls in the next-gen RMT driver, which conflicts with NeoPixelBus and
+// bootloops the device (see platformio.ini).
+#define STATUS_LED_PIN 21
+
+// Status LED settings, pushed down from the Master via CMD_SET_STATUS_LED and persisted
+// here so the Slave keeps them across a reboot without needing the Master.
+#define PREF_STATUSLED_ON "sled_on"
+#define PREF_STATUSLED_COLOR "sled_col"
+#define PREF_STATUSLED_BRI "sled_bri"
+
 // Current State
 #define PREF_STATE_ON "state_on"
 #define PREF_STATE_BRI "state_bri"

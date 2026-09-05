@@ -25,13 +25,29 @@
 #define HYPERBUS_BROADCAST_ID 255
 #define HYPERBUS_MASTER_ID 0
 
+// The ESP-NOW transport needs a marker of its own. The UART framing (0xAA start byte plus CRC16)
+// does not apply there, so without this every foreign ESP-NOW frame on the channel is parsed as a
+// HyperBus packet. That is not theoretical: a stray frame whose command byte happened to read as
+// 0x01 was taken for a PING, which made a Slave lock onto the wrong channel and cache the sender's
+// MAC as "the Master" - from then on it received the real Master's pings but unicast every reply
+// to a foreign device, so it was never discovered.
+#define HYPERBUS_ESPNOW_MAGIC0 0x48  // 'H'
+#define HYPERBUS_ESPNOW_MAGIC1 0x4C  // 'L'
+#define HYPERBUS_ESPNOW_HEADER 6     // magic(2) + targetId + senderId + command + length
+
 enum HyperBusCommand {
     CMD_PING = 0x01,
     CMD_PONG = 0x02,
     CMD_SET_CONFIG = 0x03,
     CMD_SET_LEDS = 0x04,
     CMD_TRIGGER_UPDATE = 0x05,
-    CMD_SET_LEDS_CHUNK = 0x06
+    CMD_SET_LEDS_CHUNK = 0x06,
+    // Onboard status LED of a Slave. Payload: [on][r][g][b][brightness].
+    // Deliberately its own command rather than more fields on CMD_SET_CONFIG: that keeps the
+    // config payload stable (a mismatched one silently corrupts the fields behind it) and
+    // lets the Master push LED changes on their own. Slaves on older firmware simply ignore
+    // an unknown command.
+    CMD_SET_STATUS_LED = 0x07
 };
 
 struct HyperBusPacket {

@@ -1,0 +1,14 @@
+# Partition layout for the Slave firmware on a 4MB flash (Waveshare ESP32-S3-Zero).
+#
+# Needed because the esp32-s3-devkitc-1 board profile defaults to an 8/16MB layout, whose
+# last partition runs past the end of a 4MB chip - the bootloader then rejects the whole
+# table ("partition N invalid - ... exceeds flash chip size") and the device bootloops.
+#
+# Two OTA app slots (the Master can trigger remote updates via CMD_TRIGGER_UPDATE), and no
+# filesystem: unlike the Master, the Slave serves no web UI and has no data/ directory, so
+# that space goes to the app slots instead - ~1.94MB each for a firmware currently at ~1MB.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x5000,
+otadata,  data, ota,     0xe000,   0x2000,
+app0,     app,  ota_0,   0x10000,  0x1F0000,
+app1,     app,  ota_1,   0x200000, 0x1F0000,

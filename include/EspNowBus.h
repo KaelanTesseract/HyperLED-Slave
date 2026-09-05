@@ -49,6 +49,12 @@ private:
     unsigned long _lastPingReceived = 0;
     uint8_t _currentChannel = 1;
     bool _locked = false;
+    // Scan diagnostics (see loop()).
+    uint32_t _packetsReceived = 0;
+    uint32_t _channelErrors = 0;
+    uint32_t _droppedForeign = 0;
+    bool _reportedLocked = false;
+    uint8_t _reportedChannel = 0;
     
     uint8_t _broadcastAddress[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     std::map<uint8_t, std::array<uint8_t, 6>> _peerMacs;

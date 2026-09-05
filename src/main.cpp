@@ -28,6 +28,7 @@
 #include <ArduinoJson.h>
 #include "HyperBus.h"
 #include "EspNowBus.h"
+#include "StatusLedManager.h"
 
 // Hardware UART Pins for the Waveshare ESP32-S3-Zero. UPLINK cross-wires to
 // the Master's own GPIO16/17 pair (see include/Config.h in the root project);
@@ -170,6 +171,10 @@ void saveConfig() {
 }
 
 unsigned long lastUartPacket = 0;
+// Last valid packet from the Master on ANY transport (lastUartPacket only tracks the wired
+// one). Drives the status LED's "disconnected" state, which has to work for ESP-NOW Slaves
+// too. Stays 0 until the first contact, which counts as disconnected.
+unsigned long lastMasterContact = 0;
 unsigned long wifiCandidateTime = 0;
 bool isUartSlave = false;
 uint8_t transportMode = 0;
@@ -251,7 +256,34 @@ void performOtaUpdate() {
     ESP.restart();
 }
 
+// A wireless PONG cannot be sent from handleUplinkPacket(): for ESP-NOW that function *is*
+// the receive callback and therefore runs in the WiFi task, where blocking (the collision
+// delay) and calling esp_now_send() are both forbidden. The reply is handed to loop() instead.
+// The UART path is unaffected - there the callback is already driven from loop().
+static volatile bool pendingWirelessPong = false;
+static unsigned long pendingWirelessPongAt = 0;
+
+static void sendPong(bool wireless) {
+    // PONG Payload: [LED Count L] [LED Count H] [Version Length] [Version String...] [Name...]
+    uint8_t verLen = slaveVersion.length();
+    uint16_t len = 2 + 1 + verLen + slaveName.length();
+    uint8_t* payload = (uint8_t*)malloc(len);
+    if (!payload) return;
+    payload[0] = ledCount & 0xFF;
+    payload[1] = (ledCount >> 8) & 0xFF;
+    payload[2] = verLen;
+    memcpy(&payload[3], slaveVersion.c_str(), verLen);
+    memcpy(&payload[3 + verLen], slaveName.c_str(), slaveName.length());
+
+    if (wireless) espBus.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_PONG, payload, len);
+    else busUp.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_PONG, payload, len);
+
+    free(payload);
+}
+
 void handleUplinkPacket(const HyperBusPacket& packet) {
+    if (packet.isValid) lastMasterContact = millis();
+
     if (!packet.isWireless) {
         lastUartPacket = millis();
         if (transportMode != 1) {
@@ -289,24 +321,20 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
         if (packet.command == CMD_PING) {
             // If we have an active UART connection, ignore ESP-NOW pings to avoid transport flapping!
             if (hasActiveUART && packet.isWireless) return;
-            
+
+            if (packet.isWireless) {
+                // Defer to loop() - see the note at sendPong(). The random offset still spreads
+                // replies out so several slaves don't answer the same broadcast at once.
+                if (!pendingWirelessPong) {
+                    pendingWirelessPongAt = millis() + random(10, 50);
+                    pendingWirelessPong = true;
+                }
+                return;
+            }
+
             // Reply with PONG. Random delay if unconfigured to avoid collisions on multidrop
             delay(random(10, 50));
-            
-            // PONG Payload: [LED Count L] [LED Count H] [Version Length] [Version String...] [Name...]
-            uint8_t verLen = slaveVersion.length();
-            uint16_t len = 2 + 1 + verLen + slaveName.length();
-            uint8_t* payload = (uint8_t*)malloc(len);
-            payload[0] = ledCount & 0xFF;
-            payload[1] = (ledCount >> 8) & 0xFF;
-            payload[2] = verLen;
-            memcpy(&payload[3], slaveVersion.c_str(), verLen);
-            memcpy(&payload[3 + verLen], slaveName.c_str(), slaveName.length());
-            
-            if (packet.isWireless) espBus.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_PONG, payload, len);
-            else busUp.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_PONG, payload, len);
-            
-            free(payload);
+            sendPong(false);
         }
         else if (packet.command == CMD_SET_CONFIG) {
             // Payload: [New ID] [LED Pin] [LED Pin 2] [LED Type] [LED Count L] [LED Count H]
@@ -330,6 +358,15 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
                 }
                 saveConfig();
                 initLEDs();
+            }
+        }
+        else if (packet.command == CMD_SET_STATUS_LED) {
+            // Payload: [on] [r] [g] [b] [brightness]
+            if (packet.length >= 5) {
+                uint32_t color = ((uint32_t)packet.payload[1] << 16) |
+                                 ((uint32_t)packet.payload[2] << 8) |
+                                 (uint32_t)packet.payload[3];
+                StatusLedManager.setState(packet.payload[0] != 0, color, packet.payload[4]);
             }
         }
         else if (packet.command == CMD_SET_LEDS) {
@@ -437,6 +474,8 @@ void setup() {
         espBus.setCallback(handleUplinkPacket);
     }
     
+    StatusLedManager.begin();
+
     Serial.println("Slave Ready.");
 }
 
@@ -449,6 +488,11 @@ void loop() {
     busUp.loop();
     busDown.loop();
     if (transportMode != 1) espBus.loop();
+
+    if (pendingWirelessPong && (long)(millis() - pendingWirelessPongAt) >= 0) {
+        pendingWirelessPong = false;
+        sendPong(true);
+    }
 
     if (transportMode == 0 && wifiCandidateTime > 0 && millis() - wifiCandidateTime > 3000) {
         prefs.begin("hyperled_slave", false);
@@ -478,6 +522,21 @@ void loop() {
         gpio_pullup_en((gpio_num_t)UPLINK_RX); // MUST set pullup AFTER begin!
         lastUartPacket = millis(); // Reset timer to give it time to recover
     }
+
+    // Feed the onboard status LED. The Master pings every 250ms on both transports, so a
+    // few seconds of silence means the link is really gone rather than just a dropped
+    // packet. Right after boot lastMasterContact is still 0 - that counts as disconnected
+    // too, which is what you want to see on a Slave nobody is talking to.
+    SlaveLedCondition cond;
+    if (lastMasterContact == 0 || millis() - lastMasterContact > 5000) {
+        cond = SLED_DISCONNECTED;
+    } else if (myId == 254) {
+        cond = SLED_UNCONFIGURED;
+    } else {
+        cond = SLED_OK;
+    }
+    StatusLedManager.setCondition(cond);
+    StatusLedManager.loop();
 }
 
 
