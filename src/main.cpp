@@ -68,8 +68,12 @@ String otaUrl = "";
 
 void initLEDs() {
     if (strip) {
-        delete strip;
+        // Clear the pointer before freeing it: the ESP-NOW receive callback runs in the WiFi
+        // task and guards its pixel writes with "if (strip)", so it must never see a pointer
+        // to an object that is already being torn down here.
+        IBus* old = strip;
         strip = nullptr;
+        delete old;
     }
     if ((ledCount > 0 && ledPin != 255) || ledType == TYPE_HUB75) {
         switch (ledType) {
@@ -263,6 +267,13 @@ void performOtaUpdate() {
 static volatile bool pendingWirelessPong = false;
 static unsigned long pendingWirelessPongAt = 0;
 
+// Applying a new configuration is deferred for the same reason as the PONG above: for ESP-NOW
+// handleUplinkPacket() runs in the WiFi task, and initLEDs() is far too heavy for it - it deletes
+// a possibly running DMA driver, allocates new DMA memory and reconfigures peripherals, while
+// saveConfig() writes NVS. Doing that inside the receive callback crashed the board when a Slave
+// was switched to HUB75 over the air.
+static volatile bool pendingConfigApply = false;
+
 static void sendPong(bool wireless) {
     // PONG Payload: [LED Count L] [LED Count H] [Version Length] [Version String...] [Name...]
     uint8_t verLen = slaveVersion.length();
@@ -356,8 +367,7 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
                     memcpy(nameBuf, &packet.payload[11], nameLen);
                     slaveName = String(nameBuf);
                 }
-                saveConfig();
-                initLEDs();
+                pendingConfigApply = true;
             }
         }
         else if (packet.command == CMD_SET_STATUS_LED) {
@@ -388,7 +398,15 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
               // Payload: [OffsetL] [OffsetH] [RGBW array]
               if (strip && packet.length >= 7) {
                   uint16_t offset = packet.payload[0] | (packet.payload[1] << 8);
-                  uint16_t maxLeds = min((int)(ledCount - offset), (int)((packet.length - 2) / 5));
+                  // Reject an out-of-range offset before subtracting. (ledCount - offset) is
+                  // computed as int, so an offset past the end goes negative and then wraps to
+                  // ~65000 when stored in a uint16_t, and the loop reads far past the packet.
+                  // The Master and the Slave disagree about ledCount for a moment whenever a
+                  // Slave is reconfigured, which made this crash the board with LoadProhibited.
+                  if (offset >= ledCount) return;
+                  uint16_t roomLeft = ledCount - offset;
+                  uint16_t inPacket = (packet.length - 2) / 5;
+                  uint16_t maxLeds = roomLeft < inPacket ? roomLeft : inPacket;
                   for (uint16_t i = 0; i < maxLeds; i++) {
                       uint8_t r = packet.payload[2 + i * 5];
                       uint8_t g = packet.payload[2 + i * 5 + 1];
@@ -492,6 +510,12 @@ void loop() {
     if (pendingWirelessPong && (long)(millis() - pendingWirelessPongAt) >= 0) {
         pendingWirelessPong = false;
         sendPong(true);
+    }
+
+    if (pendingConfigApply) {
+        pendingConfigApply = false;
+        saveConfig();
+        initLEDs();
     }
 
     if (transportMode == 0 && wifiCandidateTime > 0 && millis() - wifiCandidateTime > 3000) {
