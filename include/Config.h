@@ -83,8 +83,9 @@
 #define TYPE_HUB75 60
 
 // Same fixed HUB75 pinout as the Master's Config.h - both boards are the same
-// Waveshare ESP32-S3-Zero (ESP32-S3FH4R2, embedded flash + Octal PSRAM).
-// GPIO33-37 aren't exposed on this chip variant (wired internally to PSRAM),
+// Waveshare ESP32-S3-Zero (ESP32-S3FH4R2, embedded flash + 2MB quad-SPI PSRAM).
+// GPIO33-37 aren't broken out on this board (Waveshare reserves them for the
+// in-package flash/PSRAM),
 // GPIO0/3/45/46 are strapping pins, GPIO19/20 are native USB, GPIO21 drives
 // the onboard WS2812, and GPIO43/44 are the debug UART - all avoided here.
 // GPIO16/17 (UPLINK_RX/TX, main.cpp) and GPIO18/38 (DOWNLINK_RX/TX) are left
