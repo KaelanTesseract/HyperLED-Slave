@@ -47,8 +47,35 @@ enum HyperBusCommand {
     // config payload stable (a mismatched one silently corrupts the fields behind it) and
     // lets the Master push LED changes on their own. Slaves on older firmware simply ignore
     // an unknown command.
-    CMD_SET_STATUS_LED = 0x07
+    CMD_SET_STATUS_LED = 0x07,
+    // Effect parameters for a Slave that renders locally. Payload (17 bytes):
+    //   [effect][brightness][speed][intensity][palette][flags]
+    //   [r][g][b] [r2][g2][b2] [cct] [effectStep L][effectStep H] [reserved][reserved]
+    // flags: bit0 isOn, bit1 color2Enabled, bit2 whiteOnly.
+    //
+    // This replaces per-frame pixel streaming for effects the Slave can render itself: a 64x64
+    // panel is 4096 pixels per frame, which ESP-NOW cannot carry at a usable rate and which
+    // exceeds the UART payload limit outright. These parameters are sent only when something
+    // changes, plus a periodic refresh so a restarted Slave recovers on its own.
+    CMD_SET_SEGMENT = 0x08
 };
+
+// Length of a CMD_SET_SEGMENT payload. Kept as a constant so both sides agree.
+#define HYPERBUS_SEGMENT_PAYLOAD_LEN 17
+
+// Effects a Slave can render on its own. Must match EffectEngine::canRender() - the Master uses
+// this to decide whether to send parameters or fall back to streaming pixels, and getting the two
+// out of step would leave a Slave showing nothing. Effects needing Master-only resources (the
+// image library, and the clock/weather data behind the text effect) are deliberately absent.
+inline bool hyperBusEffectRendersOnSlave(uint8_t effect) {
+    switch (effect) {
+        case 0: case 1: case 2: case 3: case 5: case 6:
+        case 11: case 12: case 13: case 18: case 19: case 20: case 21:
+            return true;
+        default:
+            return false;
+    }
+}
 
 struct HyperBusPacket {
     uint8_t targetId;

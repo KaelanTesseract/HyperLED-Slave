@@ -29,6 +29,7 @@
 #include "HyperBus.h"
 #include "EspNowBus.h"
 #include "StatusLedManager.h"
+#include "EffectEngine.h"
 
 // Hardware UART Pins for the Waveshare ESP32-S3-Zero. UPLINK cross-wires to
 // the Master's own GPIO16/17 pair (see include/Config.h in the root project);
@@ -274,6 +275,26 @@ static unsigned long pendingWirelessPongAt = 0;
 // was switched to HUB75 over the air.
 static volatile bool pendingConfigApply = false;
 
+// Local rendering: the Master sends effect parameters, this Slave draws the frames itself.
+// Streaming is still supported and takes precedence - receiving pixel data switches local
+// rendering back off, so effects the Slave cannot render (image, clock/text) keep working.
+static EffectState localEffect;
+static bool localRenderActive = false;
+
+// Feeds EffectEngine output into whatever bus this Slave drives.
+class SlaveSink : public IEffectSink {
+public:
+    void setPixel(uint16_t index, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t w2) override {
+        if (strip) strip->SetPixelColor(index, r, g, b, w, w2);
+    }
+    uint16_t pixelCount() const override {
+        return (ledType == TYPE_HUB75) ? (uint16_t)(::matrixWidth * ::matrixHeight) : ledCount;
+    }
+    uint16_t matrixWidth() const override { return (ledType == TYPE_HUB75) ? ::matrixWidth : 0; }
+    uint16_t matrixHeight() const override { return (ledType == TYPE_HUB75) ? ::matrixHeight : 0; }
+};
+static SlaveSink slaveSink;
+
 static void sendPong(bool wireless) {
     // PONG Payload: [LED Count L] [LED Count H] [Version Length] [Version String...] [Name...]
     uint8_t verLen = slaveVersion.length();
@@ -370,6 +391,39 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
                 pendingConfigApply = true;
             }
         }
+        else if (packet.command == CMD_SET_SEGMENT) {
+            if (packet.length >= HYPERBUS_SEGMENT_PAYLOAD_LEN) {
+                const uint8_t* p = packet.payload;
+                localEffect.effect     = p[0];
+                localEffect.brightness = p[1];
+                localEffect.speed      = p[2];
+                localEffect.intensity  = p[3];
+                localEffect.palette    = p[4];
+                localEffect.isOn          = (p[5] & 0x01) != 0;
+                localEffect.color2Enabled = (p[5] & 0x02) != 0;
+                localEffect.whiteOnly     = (p[5] & 0x04) != 0;
+                localEffect.color  = ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 8) | p[8];
+                localEffect.color2 = ((uint32_t)p[9] << 16) | ((uint32_t)p[10] << 8) | p[11];
+                localEffect.cct    = p[12];
+                // The Master's step counter keeps a multi-panel effect roughly in phase. It is
+                // only adopted on a real change, otherwise the periodic refresh would keep
+                // resetting the animation the Slave is advancing on its own.
+                uint16_t masterStep = p[13] | ((uint16_t)p[14] << 8);
+                if (!localRenderActive) localEffect.effectStep = masterStep;
+
+                // Report only on a change, never per packet: these arrive on a refresh timer and
+                // this board's USB-CDC can stall the firmware if it is printed to to constantly.
+                static uint8_t reportedEffect = 255;
+                static bool reportedActive = false;
+                if (!reportedActive || reportedEffect != localEffect.effect) {
+                    reportedActive = true;
+                    reportedEffect = localEffect.effect;
+                    Serial.printf("Rendering effect %u locally (%ux%u)" "\n",
+                                  localEffect.effect, slaveSink.matrixWidth(), slaveSink.matrixHeight());
+                }
+                localRenderActive = true;
+            }
+        }
         else if (packet.command == CMD_SET_STATUS_LED) {
             // Payload: [on] [r] [g] [b] [brightness]
             if (packet.length >= 5) {
@@ -381,6 +435,7 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
         }
         else if (packet.command == CMD_SET_LEDS) {
               // Payload: RGBW array (5 bytes per pixel)
+              localRenderActive = false; // the Master is driving the pixels again
               if (strip && packet.length >= 5) {
                   uint16_t maxLeds = min((int)ledCount, (int)(packet.length / 5));
                   for (uint16_t i = 0; i < maxLeds; i++) {
@@ -396,6 +451,7 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
           }
         else if (packet.command == CMD_SET_LEDS_CHUNK) {
               // Payload: [OffsetL] [OffsetH] [RGBW array]
+              localRenderActive = false; // the Master is driving the pixels again
               if (strip && packet.length >= 7) {
                   uint16_t offset = packet.payload[0] | (packet.payload[1] << 8);
                   // Reject an out-of-range offset before subtracting. (ledCount - offset) is
@@ -516,6 +572,15 @@ void loop() {
         pendingConfigApply = false;
         saveConfig();
         initLEDs();
+    }
+
+    // Draw locally when the Master has handed us effect parameters. EffectEngine::render() does
+    // its own speed timing and reports whether anything actually changed, so an idle effect
+    // costs nothing and the panel is only pushed when there is a new frame.
+    if (localRenderActive && strip) {
+        if (EffectEngine::render(localEffect, slaveSink, millis())) {
+            strip->Show();
+        }
     }
 
     if (transportMode == 0 && wifiCandidateTime > 0 && millis() - wifiCandidateTime > 3000) {
