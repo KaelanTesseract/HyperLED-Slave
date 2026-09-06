@@ -56,6 +56,14 @@ struct EffectState {
     std::vector<uint8_t> fireHeat;        // Fire (pixel-sized) and Fire 2D (canvas-sized)
     std::vector<uint8_t> rippleState;     // 3 bytes (x, y, radius) per ripple
     std::vector<int16_t> matrixRainHeads; // one falling head position per column
+    std::vector<uint8_t> twinkleState;    // fade level per pixel
+    std::vector<uint8_t> sinelonState;    // decaying trail brightness per pixel
+    std::vector<uint8_t> confettiState;   // fade level per spark
+    std::vector<uint8_t> confettiHue;     // each spark's own hue, kept apart from its fade
+    std::vector<uint8_t> juggleState;     // 3 bytes (r, g, b) per pixel, additively blended
+    std::vector<uint8_t> fireworksState;  // 6 bytes (x, y, peakY, hue, timer, state) per rocket
+    std::vector<uint8_t> starfieldState;  // 3 bytes (dx, dy, radius) per star
+    std::vector<uint8_t> ballsState;      // 5 bytes (x, y, vx, vy, hue) per ball
 };
 
 // Where rendered pixels go. Implemented by the Slave over its own strip or panel.
@@ -83,9 +91,11 @@ public:
     // are deliberately excluded and keep using streamed pixel data.
     static bool canRender(uint8_t effect) {
         switch (effect) {
-            case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 9:
-            case 11: case 12: case 13: case 18: case 19: case 20: case 21:
-            case 22: case 23:
+            // Everything except 25 (image data) and 29 (clock/text), which need resources only
+            // the Master has. 10 is not an effect - it is the white-only mode handled elsewhere.
+            case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7: case 8: case 9:
+            case 11: case 12: case 13: case 14: case 15: case 16: case 17: case 18: case 19:
+            case 20: case 21: case 22: case 23: case 24: case 26: case 27: case 28:
                 return true;
             default:
                 return false;
@@ -134,6 +144,16 @@ public:
             case 9:  matrixRain(st, sink); break;
             case 22: ripple(st, sink); break;
             case 23: fire2D(st, sink); break;
+            case 7:  twinkle(st, sink); break;
+            case 8:  meteor(st, sink); break;
+            case 14: sinelon(st, sink); break;
+            case 15: confetti(st, sink); break;
+            case 16: juggle(st, sink); break;
+            case 17: bpm(st, sink); break;
+            case 24: pacifica(st, sink); break;
+            case 26: fireworks(st, sink); break;
+            case 27: starfield(st, sink); break;
+            case 28: bouncingBalls(st, sink); break;
             default: solid(st, sink); break;
         }
     }
@@ -533,6 +553,380 @@ private:
             }
             radius++;
             st.rippleState[base + 2] = (radius >= maxRadius) ? 0 : radius;
+        }
+        st.effectStep++;
+    }
+
+    static void twinkle(EffectState& st, IEffectSink& sink) {
+        uint16_t count = sink.pixelCount();
+        if (count == 0) return;
+        if (st.twinkleState.size() != count) st.twinkleState.assign(count, 0);
+
+        // intensity controls sparkle density (roughly 2%-40% ignite chance per frame)
+        if (random(0, 100) < (2 + st.intensity / 6)) st.twinkleState[random(0, count)] = 255;
+
+        for (uint16_t i = 0; i < count; i++) {
+            uint8_t& fade = st.twinkleState[i];
+            if (fade == 0) { emit(st, sink, i, 0, 0, 0); continue; }
+            // Each position samples its own spot in the palette, for colour variety.
+            uint32_t c = (st.palette == 0) ? st.color
+                                           : paletteColor(st.palette, (uint8_t)((i * 256 / count) & 0xFF));
+            uint8_t r = (uint8_t)((((c >> 16) & 0xFF) * bri(st) / 255) * fade / 255);
+            uint8_t g = (uint8_t)((((c >> 8) & 0xFF) * bri(st) / 255) * fade / 255);
+            uint8_t b = (uint8_t)(((c & 0xFF) * bri(st) / 255) * fade / 255);
+            emit(st, sink, i, r, g, b);
+            fade = (fade > 14) ? fade - 14 : 0;
+        }
+    }
+
+    static void meteor(EffectState& st, IEffectSink& sink) {
+        uint16_t count = sink.pixelCount();
+        if (count == 0) return;
+        uint8_t r, g, b; scaled(st.color, bri(st), r, g, b);
+
+        for (uint16_t i = 0; i < count; i++) emit(st, sink, i, 0, 0, 0);
+
+        uint16_t pos = st.effectStep % count;
+        uint16_t trailLen = 2 + st.intensity / 32; // intensity controls trail length (2-9 pixels)
+        for (uint16_t i = 0; i < trailLen; i++) {
+            if (pos >= i) {
+                uint16_t pixel = pos - i;
+                if (pixel < count) emit(st, sink, pixel, r / (i + 1), g / (i + 1), b / (i + 1));
+            }
+        }
+        st.effectStep++;
+    }
+
+    static void sinelon(EffectState& st, IEffectSink& sink) {
+        uint16_t count = sink.pixelCount();
+        if (count == 0) return;
+        if (st.sinelonState.size() != count) st.sinelonState.assign(count, 0);
+
+        // intensity controls trail length: higher fades slower, so the trail runs longer
+        uint8_t decay = 2 + (255 - st.intensity) / 16;
+        for (uint16_t i = 0; i < count; i++) {
+            uint8_t& v = st.sinelonState[i];
+            v = (v > decay) ? v - decay : 0;
+        }
+
+        uint16_t span = count > 1 ? count * 2 - 2 : 1;
+        uint16_t raw = st.effectStep % span;
+        uint16_t pos = raw >= count ? span - raw : raw;
+        st.sinelonState[pos] = 255;
+
+        uint8_t baseR = (st.color >> 16) & 0xFF;
+        uint8_t baseG = (st.color >> 8) & 0xFF;
+        uint8_t baseB = st.color & 0xFF;
+        for (uint16_t i = 0; i < count; i++) {
+            uint16_t v = st.sinelonState[i];
+            emit(st, sink, i, (uint8_t)((uint32_t)baseR * bri(st) / 255 * v / 255),
+                              (uint8_t)((uint32_t)baseG * bri(st) / 255 * v / 255),
+                              (uint8_t)((uint32_t)baseB * bri(st) / 255 * v / 255));
+        }
+        st.effectStep++;
+    }
+
+    static void confetti(EffectState& st, IEffectSink& sink) {
+        uint16_t count = sink.pixelCount();
+        if (count == 0) return;
+        if (st.confettiState.size() != count) {
+            st.confettiState.assign(count, 0);
+            st.confettiHue.assign(count, 0);
+        }
+
+        for (uint16_t i = 0; i < count; i++) {
+            uint8_t& v = st.confettiState[i];
+            v = (v > 10) ? v - 10 : 0;
+        }
+        // intensity controls spark density (roughly 3%-45% ignite chance per frame)
+        if (random(0, 100) < (3 + st.intensity / 6)) {
+            uint16_t idx = random(0, count);
+            st.confettiState[idx] = 255;
+            st.confettiHue[idx] = (uint8_t)random(0, 256);
+        }
+
+        for (uint16_t i = 0; i < count; i++) {
+            uint16_t v = st.confettiState[i];
+            if (v == 0) { emit(st, sink, i, 0, 0, 0); continue; }
+            uint32_t c = (st.palette == 0) ? wheel(st.confettiHue[i])
+                                           : paletteColor(st.palette, st.confettiHue[i]);
+            emit(st, sink, i, (uint8_t)((((c >> 16) & 0xFF) * bri(st) / 255) * v / 255),
+                              (uint8_t)((((c >> 8) & 0xFF) * bri(st) / 255) * v / 255),
+                              (uint8_t)(((c & 0xFF) * bri(st) / 255) * v / 255));
+        }
+    }
+
+    static void juggle(EffectState& st, IEffectSink& sink) {
+        uint16_t count = sink.pixelCount();
+        if (count == 0) return;
+        if (st.juggleState.size() != (size_t)count * 3) st.juggleState.assign((size_t)count * 3, 0);
+
+        for (uint16_t i = 0; i < count * 3; i++) {
+            uint8_t& v = st.juggleState[i];
+            v = (v > 20) ? v - 20 : 0;
+        }
+
+        // Dots blend additively into the trail buffer, so overlaps brighten rather than overwrite.
+        const uint8_t numDots = 4;
+        uint16_t span = count > 1 ? count * 2 - 2 : 1;
+        for (uint8_t d = 0; d < numDots; d++) {
+            uint16_t phase = (uint16_t)(st.effectStep * (d + 1)) % span;
+            uint16_t pos = phase >= count ? span - phase : phase;
+
+            uint32_t c = wheel((uint8_t)(d * 256 / numDots));
+            uint16_t base = pos * 3;
+            uint16_t nr = st.juggleState[base]     + ((c >> 16) & 0xFF);
+            uint16_t ng = st.juggleState[base + 1] + ((c >> 8) & 0xFF);
+            uint16_t nb = st.juggleState[base + 2] + (c & 0xFF);
+            st.juggleState[base]     = nr > 255 ? 255 : (uint8_t)nr;
+            st.juggleState[base + 1] = ng > 255 ? 255 : (uint8_t)ng;
+            st.juggleState[base + 2] = nb > 255 ? 255 : (uint8_t)nb;
+        }
+
+        for (uint16_t i = 0; i < count; i++) {
+            uint16_t base = i * 3;
+            emit(st, sink, i, (uint8_t)((uint32_t)st.juggleState[base] * bri(st) / 255),
+                              (uint8_t)((uint32_t)st.juggleState[base + 1] * bri(st) / 255),
+                              (uint8_t)((uint32_t)st.juggleState[base + 2] * bri(st) / 255));
+        }
+        st.effectStep++;
+    }
+
+    static void bpm(EffectState& st, IEffectSink& sink) {
+        uint16_t count = sink.pixelCount();
+        if (count == 0) return;
+
+        // The palette flows across the segment while the whole thing pulses, never fully dark.
+        uint8_t pulse = triWave8((uint8_t)(st.effectStep & 0xFF));
+        uint16_t beatBri = 40 + ((uint16_t)pulse * (255 - 40)) / 255;
+
+        for (uint16_t i = 0; i < count; i++) {
+            uint8_t huePos = (uint8_t)(((i * 256 / count) + (st.effectStep / 4)) & 0xFF);
+            uint32_t c = (st.palette == 0) ? wheel(huePos) : paletteColor(st.palette, huePos);
+            uint16_t scale = (uint16_t)bri(st) * beatBri / 255;
+            emit(st, sink, i, (uint8_t)((((c >> 16) & 0xFF) * scale) / 255),
+                              (uint8_t)((((c >> 8) & 0xFF) * scale) / 255),
+                              (uint8_t)(((c & 0xFF) * scale) / 255));
+        }
+        st.effectStep += 2;
+    }
+
+    static void pacifica(EffectState& st, IEffectSink& sink) {
+        uint16_t cw = sink.matrixWidth();
+        uint16_t ch = sink.matrixHeight();
+        if (cw == 0 || ch == 0) { colorWaves(st, sink); return; } // same 1D fallback as the Master
+
+        uint8_t speedScale = 1 + st.intensity / 32; // nudges how fast the layers drift apart
+        for (uint16_t y = 0; y < ch; y++) {
+            for (uint16_t x = 0; x < cw; x++) {
+                uint8_t w1 = triWave8((uint8_t)(x * 6 + y * 2 + st.effectStep));
+                uint8_t w2 = triWave8((uint8_t)(x * 3 - y * 4 + st.effectStep * 2 * speedScale));
+                uint8_t w3 = triWave8((uint8_t)(x * 8 + y * 5 - st.effectStep / 2));
+                uint8_t pos = (uint8_t)(((uint16_t)w1 + w2 + w3) / 3);
+                // Defaults to the Ocean palette: a rainbow fallback would defeat the point.
+                uint32_t c = (st.palette == 0) ? paletteColor(3, pos) : paletteColor(st.palette, pos);
+                uint8_t r, g, b; scaled(c, bri(st), r, g, b);
+                sink.setPixelXY(x, y, r, g, b);
+            }
+        }
+        st.effectStep++;
+    }
+
+    static void fireworks(EffectState& st, IEffectSink& sink) {
+        uint16_t cw = sink.matrixWidth();
+        uint16_t ch = sink.matrixHeight();
+        if (cw == 0 || ch == 0) { meteor(st, sink); return; } // same 1D fallback as the Master
+
+        const uint8_t numRockets = 2;
+        if (st.fireworksState.size() != (size_t)numRockets * 6) {
+            st.fireworksState.assign((size_t)numRockets * 6, 0);
+            for (uint8_t i = 0; i < numRockets; i++) {
+                st.fireworksState[i * 6 + 4] = (uint8_t)random(0, 40); // stagger initial launches
+            }
+        }
+
+        for (uint16_t y = 0; y < ch; y++)
+            for (uint16_t x = 0; x < cw; x++) sink.setPixelXY(x, y, 0, 0, 0);
+
+        uint8_t maxRadius = 10 + st.intensity / 16; // intensity controls burst size
+
+        for (uint8_t i = 0; i < numRockets; i++) {
+            uint8_t base = i * 6;
+            uint8_t rx = st.fireworksState[base];
+            uint8_t ry = st.fireworksState[base + 1];
+            uint8_t peakY = st.fireworksState[base + 2];
+            uint8_t hue = st.fireworksState[base + 3];
+            uint8_t timer = st.fireworksState[base + 4];
+            uint8_t state = st.fireworksState[base + 5];
+
+            if (state == 0) {
+                if (timer == 0) { // waiting for the next launch
+                    rx = (uint8_t)random(0, cw > 255 ? 255 : cw);
+                    ry = (uint8_t)((ch > 255 ? 255 : ch) - 1);
+                    peakY = (uint8_t)random(ch / 4, (ch * 2) / 3 + 1);
+                    hue = (uint8_t)random(0, 256);
+                    state = 1;
+                } else {
+                    timer--;
+                }
+            } else if (state == 1) { // rising
+                uint32_t c = (st.palette == 0) ? wheel(hue) : paletteColor(st.palette, hue);
+                uint8_t r, g, b; scaled(c, bri(st), r, g, b);
+                sink.setPixelXY(rx, ry, r, g, b);
+                if (ry <= peakY || ry == 0) { state = 2; timer = 0; }
+                else { ry--; }
+            } else { // exploding: an expanding, fading ring, same maths as Ripple
+                uint32_t c = (st.palette == 0) ? wheel(hue) : paletteColor(st.palette, hue);
+                uint8_t baseR = (c >> 16) & 0xFF, baseG = (c >> 8) & 0xFF, baseB = c & 0xFF;
+                uint8_t radius = timer;
+                for (uint16_t y = 0; y < ch; y++) {
+                    for (uint16_t x = 0; x < cw; x++) {
+                        int16_t dx = (int16_t)x - rx;
+                        int16_t dy = (int16_t)y - ry;
+                        uint16_t distSq = (uint16_t)(dx * dx + dy * dy);
+                        uint16_t rSq = (uint16_t)radius * radius;
+                        uint16_t rPrevSq = radius > 1 ? (uint16_t)(radius - 1) * (radius - 1) : 0;
+                        if (distSq <= rSq && distSq > rPrevSq) {
+                            uint8_t fade = 255 - (uint16_t)(radius * 255 / maxRadius);
+                            sink.setPixelXY(x, y, (baseR * bri(st) / 255 * fade) / 255,
+                                                  (baseG * bri(st) / 255 * fade) / 255,
+                                                  (baseB * bri(st) / 255 * fade) / 255);
+                        }
+                    }
+                }
+                timer++;
+                if (timer >= maxRadius) {
+                    state = 0;
+                    timer = (uint8_t)random(20, 80); // cooldown before the next launch
+                }
+            }
+
+            st.fireworksState[base] = rx;
+            st.fireworksState[base + 1] = ry;
+            st.fireworksState[base + 2] = peakY;
+            st.fireworksState[base + 3] = hue;
+            st.fireworksState[base + 4] = timer;
+            st.fireworksState[base + 5] = state;
+        }
+        st.effectStep++;
+    }
+
+    static void starfield(EffectState& st, IEffectSink& sink) {
+        uint16_t cw = sink.matrixWidth();
+        uint16_t ch = sink.matrixHeight();
+        if (cw == 0 || ch == 0) { twinkle(st, sink); return; } // same 1D fallback as the Master
+
+        const uint8_t numStars = 32;
+        if (st.starfieldState.size() != (size_t)numStars * 3) {
+            st.starfieldState.assign((size_t)numStars * 3, 0);
+            for (uint8_t i = 0; i < numStars; i++) {
+                int8_t dx = 0, dy = 0;
+                while (dx == 0 && dy == 0) { dx = (int8_t)random(-8, 9); dy = (int8_t)random(-8, 9); }
+                st.starfieldState[i * 3] = (uint8_t)dx;
+                st.starfieldState[i * 3 + 1] = (uint8_t)dy;
+                st.starfieldState[i * 3 + 2] = (uint8_t)random(0, 40); // stagger initial radii
+            }
+        }
+
+        for (uint16_t y = 0; y < ch; y++)
+            for (uint16_t x = 0; x < cw; x++) sink.setPixelXY(x, y, 0, 0, 0);
+
+        int16_t centerX = cw / 2;
+        int16_t centerY = ch / 2;
+        uint16_t maxRadius = (cw > ch ? cw : ch);
+        uint8_t speed = 1 + st.intensity / 32; // intensity controls warp speed
+
+        uint8_t baseR = (st.color >> 16) & 0xFF;
+        uint8_t baseG = (st.color >> 8) & 0xFF;
+        uint8_t baseB = st.color & 0xFF;
+
+        for (uint8_t i = 0; i < numStars; i++) {
+            int8_t dx = (int8_t)st.starfieldState[i * 3];
+            int8_t dy = (int8_t)st.starfieldState[i * 3 + 1];
+            uint8_t radius = st.starfieldState[i * 3 + 2];
+
+            int16_t px = centerX + ((int16_t)dx * radius) / 8;
+            int16_t py = centerY + ((int16_t)dy * radius) / 8;
+
+            if (px >= 0 && px < (int16_t)cw && py >= 0 && py < (int16_t)ch) {
+                uint8_t fade = (uint16_t)radius * 255 / maxRadius;
+                uint32_t c = (st.palette == 0)
+                    ? (((uint32_t)baseR << 16) | ((uint32_t)baseG << 8) | baseB)
+                    : paletteColor(st.palette, (uint8_t)(radius * 3));
+                sink.setPixelXY(px, py, (uint8_t)((((c >> 16) & 0xFF) * bri(st) / 255) * fade / 255),
+                                        (uint8_t)((((c >> 8) & 0xFF) * bri(st) / 255) * fade / 255),
+                                        (uint8_t)(((c & 0xFF) * bri(st) / 255) * fade / 255));
+            }
+
+            uint16_t newRadius = (uint16_t)radius + speed;
+            if (newRadius > maxRadius || px < -2 || px > (int16_t)cw + 2 ||
+                py < -2 || py > (int16_t)ch + 2) {
+                int8_t ndx = 0, ndy = 0;
+                while (ndx == 0 && ndy == 0) { ndx = (int8_t)random(-8, 9); ndy = (int8_t)random(-8, 9); }
+                st.starfieldState[i * 3] = (uint8_t)ndx;
+                st.starfieldState[i * 3 + 1] = (uint8_t)ndy;
+                st.starfieldState[i * 3 + 2] = 0;
+            } else {
+                st.starfieldState[i * 3 + 2] = (uint8_t)newRadius;
+            }
+        }
+        st.effectStep++;
+    }
+
+    static void bouncingBalls(EffectState& st, IEffectSink& sink) {
+        uint16_t cw = sink.matrixWidth();
+        uint16_t ch = sink.matrixHeight();
+        if (cw == 0 || ch == 0) { meteor(st, sink); return; } // same 1D fallback as the Master
+        if (cw < 2 || ch < 2) return;
+
+        const uint8_t numBalls = 4;
+        if (st.ballsState.size() != (size_t)numBalls * 5) {
+            st.ballsState.assign((size_t)numBalls * 5, 0);
+            for (uint8_t i = 0; i < numBalls; i++) {
+                uint8_t base = i * 5;
+                st.ballsState[base] = (uint8_t)random(0, cw > 255 ? 255 : cw);
+                st.ballsState[base + 1] = (uint8_t)random(0, ch > 255 ? 255 : ch);
+                int8_t vx = (int8_t)((random(0, 2) ? 1 : -1) * (1 + random(0, 2)));
+                int8_t vy = (int8_t)((random(0, 2) ? 1 : -1) * (1 + random(0, 2)));
+                st.ballsState[base + 2] = (uint8_t)vx;
+                st.ballsState[base + 3] = (uint8_t)vy;
+                st.ballsState[base + 4] = (uint8_t)random(0, 256);
+            }
+        }
+
+        for (uint16_t y = 0; y < ch; y++)
+            for (uint16_t x = 0; x < cw; x++) sink.setPixelXY(x, y, 0, 0, 0);
+
+        for (uint8_t i = 0; i < numBalls; i++) {
+            uint8_t base = i * 5;
+            int16_t x = st.ballsState[base];
+            int16_t y = st.ballsState[base + 1];
+            int8_t vx = (int8_t)st.ballsState[base + 2];
+            int8_t vy = (int8_t)st.ballsState[base + 3];
+            uint8_t hue = st.ballsState[base + 4];
+
+            x += vx;
+            y += vy;
+            if (x <= 0) { x = 0; vx = (int8_t)(-vx); }
+            if (x >= (int16_t)cw - 1) { x = cw - 1; vx = (int8_t)(-vx); }
+            if (y <= 0) { y = 0; vy = (int8_t)(-vy); }
+            if (y >= (int16_t)ch - 1) { y = ch - 1; vy = (int8_t)(-vy); }
+
+            uint32_t c = (st.palette == 0) ? wheel(hue) : paletteColor(st.palette, hue);
+            uint8_t r, g, b; scaled(c, bri(st), r, g, b);
+
+            // Each ball leaves a small "+"-shaped glow around it.
+            sink.setPixelXY(x, y, r, g, b);
+            uint8_t dimR = r / 3, dimG = g / 3, dimB = b / 3;
+            if (x > 0) sink.setPixelXY(x - 1, y, dimR, dimG, dimB);
+            if (x < (int16_t)cw - 1) sink.setPixelXY(x + 1, y, dimR, dimG, dimB);
+            if (y > 0) sink.setPixelXY(x, y - 1, dimR, dimG, dimB);
+            if (y < (int16_t)ch - 1) sink.setPixelXY(x, y + 1, dimR, dimG, dimB);
+
+            st.ballsState[base] = (uint8_t)x;
+            st.ballsState[base + 1] = (uint8_t)y;
+            st.ballsState[base + 2] = (uint8_t)vx;
+            st.ballsState[base + 3] = (uint8_t)vy;
         }
         st.effectStep++;
     }
