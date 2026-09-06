@@ -456,9 +456,9 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
                     reportedActive = true;
                     reportedEffect = localEffect.effect;
                     reportedWindow = slaveSink.windowTotal;
-                    Serial.printf("Rendering effect %u locally (%ux%u, window %u+%u)" "\n",
+                    Serial.printf("Rendering effect %u locally (%ux%u, window %u+%u, bri %u)" "\n",
                                   localEffect.effect, slaveSink.matrixWidth(), slaveSink.matrixHeight(),
-                                  slaveSink.windowOffset, slaveSink.windowTotal);
+                                  slaveSink.windowOffset, slaveSink.windowTotal, localEffect.brightness);
                 }
                 localRenderActive = true;
             }
