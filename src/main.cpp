@@ -604,8 +604,12 @@ void loop() {
         }
     }
     
-    // Hardware Lockup Recovery
-    if (transportMode == 1 && lastUartPacket > 0 && millis() - lastUartPacket > 2000) {
+    // Hardware Lockup Recovery. The threshold is 5s rather than 2s: a Slave that renders its own
+    // effects only receives the 4 pings/s, where it used to see a constant stream of pixel data,
+    // so a brief pause on the Master - reinitialising its LED bus when segments change, for
+    // instance - is enough to look like a dead UART. 5s still catches a genuinely stuck
+    // peripheral quickly, and matches what the wireless transport treats as losing the Master.
+    if (transportMode == 1 && lastUartPacket > 0 && millis() - lastUartPacket > 5000) {
         Serial.println("UART Hardware Lockup detected! Restarting peripheral...");
         busUp.begin(115200, UPLINK_RX, UPLINK_TX);
         gpio_pullup_en((gpio_num_t)UPLINK_RX); // MUST set pullup AFTER begin!
