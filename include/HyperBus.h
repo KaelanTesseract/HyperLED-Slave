@@ -48,10 +48,16 @@ enum HyperBusCommand {
     // lets the Master push LED changes on their own. Slaves on older firmware simply ignore
     // an unknown command.
     CMD_SET_STATUS_LED = 0x07,
-    // Effect parameters for a Slave that renders locally. Payload (17 bytes):
+    // Effect parameters for a Slave that renders locally. Payload (19 bytes):
     //   [effect][brightness][speed][intensity][palette][flags]
-    //   [r][g][b] [r2][g2][b2] [cct] [effectStep L][effectStep H] [reserved][reserved]
+    //   [r][g][b] [r2][g2][b2] [cct] [effectStep L][effectStep H]
+    //   [windowOffset L][windowOffset H] [windowTotal L][windowTotal H]
     // flags: bit0 isOn, bit1 color2Enabled, bit2 whiteOnly.
+    //
+    // The window is what makes sync mode work across devices. With sync on, one effect runs
+    // across the whole chain, so a Slave must not restart it at its own pixel 0 - it renders the
+    // effect over windowTotal pixels and displays only the slice starting at windowOffset. A
+    // windowTotal of 0 means no sync: the Slave renders for its own pixel count as usual.
     //
     // This replaces per-frame pixel streaming for effects the Slave can render itself: a 64x64
     // panel is 4096 pixels per frame, which ESP-NOW cannot carry at a usable rate and which
@@ -61,7 +67,7 @@ enum HyperBusCommand {
 };
 
 // Length of a CMD_SET_SEGMENT payload. Kept as a constant so both sides agree.
-#define HYPERBUS_SEGMENT_PAYLOAD_LEN 17
+#define HYPERBUS_SEGMENT_PAYLOAD_LEN 19
 
 // Which effects a Slave can render on its own is decided by EffectEngine::canRender() alone.
 // This header deliberately does not carry a second copy of that list: it did, and adding effects

@@ -284,16 +284,41 @@ static bool localRenderActive = false;
 // Feeds EffectEngine output into whatever bus this Slave drives.
 class SlaveSink : public IEffectSink {
 public:
-    void setPixel(uint16_t index, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t w2) override {
-        if (strip) strip->SetPixelColor(index, r, g, b, w, w2);
-    }
-    uint16_t pixelCount() const override {
+    // Sync mode: the Master runs one effect across the whole chain and tells us which slice of it
+    // we are. We then render the full-length effect and keep only our window, so a scanner or
+    // chase crosses the segment boundary instead of restarting at our own pixel 0.
+    // windowTotal == 0 means no sync - render for our own pixel count, as usual.
+    uint16_t windowOffset = 0;
+    uint16_t windowTotal = 0;
+
+    uint16_t localCount() const {
         return (ledType == TYPE_HUB75) ? (uint16_t)(::matrixWidth * ::matrixHeight) : ledCount;
     }
-    uint16_t matrixWidth() const override { return (ledType == TYPE_HUB75) ? ::matrixWidth : 0; }
-    uint16_t matrixHeight() const override { return (ledType == TYPE_HUB75) ? ::matrixHeight : 0; }
+    void setPixel(uint16_t index, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t w2) override {
+        if (!strip) return;
+        uint16_t local = index;
+        if (windowTotal > 0) {
+            if (index < windowOffset) return;          // belongs to a device before us
+            local = index - windowOffset;
+            if (local >= localCount()) return;         // belongs to a device after us
+        }
+        strip->SetPixelColor(local, r, g, b, w, w2);
+    }
+    uint16_t pixelCount() const override { return windowTotal > 0 ? windowTotal : localCount(); }
+    // A panel is driven as a plain strip while synced: the chain the Master spans is linear, so
+    // 2D effects fall back to their 1D relative for the duration.
+    uint16_t matrixWidth() const override {
+        return (ledType == TYPE_HUB75 && windowTotal == 0) ? ::matrixWidth : 0;
+    }
+    uint16_t matrixHeight() const override {
+        return (ledType == TYPE_HUB75 && windowTotal == 0) ? ::matrixHeight : 0;
+    }
 };
 static SlaveSink slaveSink;
+
+// Set when the Master drives the animation itself (sync mode) and we must draw right away
+// instead of waiting for our own frame timer.
+static volatile bool forceRender = false;
 
 static void sendPong(bool wireless) {
     // PONG Payload: [LED Count L] [LED Count H] [Version Length] [Version String...] [Name...]
@@ -409,17 +434,31 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
                 // only adopted on a real change, otherwise the periodic refresh would keep
                 // resetting the animation the Slave is advancing on its own.
                 uint16_t masterStep = p[13] | ((uint16_t)p[14] << 8);
-                if (!localRenderActive) localEffect.effectStep = masterStep;
+                slaveSink.windowOffset = p[15] | ((uint16_t)p[16] << 8);
+                slaveSink.windowTotal  = p[17] | ((uint16_t)p[18] << 8);
+
+                if (slaveSink.windowTotal > 0) {
+                    // Synced: the Master owns the clock. Take its step and draw immediately -
+                    // advancing on our own would let the pattern drift apart at the boundary.
+                    localEffect.effectStep = masterStep;
+                    forceRender = true;
+                } else if (!localRenderActive) {
+                    localEffect.effectStep = masterStep;
+                }
 
                 // Report only on a change, never per packet: these arrive on a refresh timer and
                 // this board's USB-CDC can stall the firmware if it is printed to to constantly.
                 static uint8_t reportedEffect = 255;
                 static bool reportedActive = false;
-                if (!reportedActive || reportedEffect != localEffect.effect) {
+                static uint16_t reportedWindow = 0xFFFF;
+                if (!reportedActive || reportedEffect != localEffect.effect
+                    || reportedWindow != slaveSink.windowTotal) {
                     reportedActive = true;
                     reportedEffect = localEffect.effect;
-                    Serial.printf("Rendering effect %u locally (%ux%u)" "\n",
-                                  localEffect.effect, slaveSink.matrixWidth(), slaveSink.matrixHeight());
+                    reportedWindow = slaveSink.windowTotal;
+                    Serial.printf("Rendering effect %u locally (%ux%u, window %u+%u)" "\n",
+                                  localEffect.effect, slaveSink.matrixWidth(), slaveSink.matrixHeight(),
+                                  slaveSink.windowOffset, slaveSink.windowTotal);
                 }
                 localRenderActive = true;
             }
@@ -578,7 +617,11 @@ void loop() {
     // its own speed timing and reports whether anything actually changed, so an idle effect
     // costs nothing and the panel is only pushed when there is a new frame.
     if (localRenderActive && strip) {
-        if (EffectEngine::render(localEffect, slaveSink, millis())) {
+        if (forceRender) {
+            forceRender = false;
+            EffectEngine::draw(localEffect, slaveSink);
+            strip->Show();
+        } else if (EffectEngine::render(localEffect, slaveSink, millis())) {
             strip->Show();
         }
     }
