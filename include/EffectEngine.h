@@ -20,6 +20,7 @@
 #define EFFECTENGINE_H
 
 #include <Arduino.h>
+#include <vector>
 
 // Effect rendering, decoupled from where the pixels end up.
 //
@@ -49,6 +50,12 @@ struct EffectState {
     // Animation state, owned by the renderer rather than the sender.
     uint16_t effectStep = 0;
     unsigned long lastUpdate = 0;
+
+    // Per-pixel memory for effects that carry a picture from one frame into the next. Sized
+    // lazily on first use: the size depends on the sink, and only some effects need any.
+    std::vector<uint8_t> fireHeat;        // Fire (pixel-sized) and Fire 2D (canvas-sized)
+    std::vector<uint8_t> rippleState;     // 3 bytes (x, y, radius) per ripple
+    std::vector<int16_t> matrixRainHeads; // one falling head position per column
 };
 
 // Where rendered pixels go. Implemented by the Slave over its own strip or panel.
@@ -76,8 +83,9 @@ public:
     // are deliberately excluded and keep using streamed pixel data.
     static bool canRender(uint8_t effect) {
         switch (effect) {
-            case 0: case 1: case 2: case 3: case 5: case 6:
+            case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 9:
             case 11: case 12: case 13: case 18: case 19: case 20: case 21:
+            case 22: case 23:
                 return true;
             default:
                 return false;
@@ -122,6 +130,10 @@ public:
             case 19: runningLights(st, sink); break;
             case 20: colorWaves(st, sink); break;
             case 21: plasma(st, sink); break;
+            case 4:  fire(st, sink); break;
+            case 9:  matrixRain(st, sink); break;
+            case 22: ripple(st, sink); break;
+            case 23: fire2D(st, sink); break;
             default: solid(st, sink); break;
         }
     }
@@ -349,6 +361,178 @@ private:
             uint32_t c = (st.palette == 0) ? wheel(pos) : paletteColor(st.palette, pos);
             uint8_t r, g, b; scaled(c, bri(st), r, g, b);
             emit(st, sink, i, r, g, b);
+        }
+        st.effectStep++;
+    }
+
+    // Maps a heat value to a flame colour. Palette 0 uses the classic black-red-yellow-white
+    // ramp; any other palette recolours the flame (Ocean turns it into rising bubbles).
+    static void heatToColor(const EffectState& st, uint8_t heat, uint8_t& r, uint8_t& g, uint8_t& b) {
+        if (st.palette == 0) {
+            uint8_t t192 = (heat * 191) / 255;
+            uint8_t heatramp = (t192 & 0x3F) << 2;
+            if (t192 > 128) { r = 255; g = 255; b = heatramp; }
+            else if (t192 > 64) { r = 255; g = heatramp; b = 0; }
+            else { r = heatramp; g = 0; b = 0; }
+        } else {
+            uint32_t c = paletteColor(st.palette, heat);
+            r = (c >> 16) & 0xFF; g = (c >> 8) & 0xFF; b = c & 0xFF;
+        }
+        r = (r * st.brightness) / 255;
+        g = (g * st.brightness) / 255;
+        b = (b * st.brightness) / 255;
+    }
+
+    static void fire(EffectState& st, IEffectSink& sink) {
+        uint16_t count = sink.pixelCount();
+        if (count == 0) return;
+        if (st.fireHeat.size() != count) st.fireHeat.assign(count, 0);
+
+        // intensity controls the cooling rate: higher means shorter, choppier flames
+        const uint8_t cooling = 20 + (st.intensity * 80) / 255;
+        const uint8_t sparking = 120;
+
+        for (uint16_t i = 0; i < count; i++) {
+            uint8_t cooldown = random(0, ((cooling * 10) / count) + 2);
+            st.fireHeat[i] = (st.fireHeat[i] > cooldown) ? st.fireHeat[i] - cooldown : 0;
+        }
+        for (uint16_t i = count - 1; i >= 2; i--) {
+            st.fireHeat[i] = (st.fireHeat[i - 1] + st.fireHeat[i - 2] + st.fireHeat[i - 2]) / 3;
+        }
+        if (random(0, 255) < sparking) {
+            uint16_t sparkRange = count < 7 ? count : 7;
+            uint16_t y = random(0, sparkRange);
+            uint16_t add = random(160, 255);
+            st.fireHeat[y] = (st.fireHeat[y] + add > 255) ? 255 : st.fireHeat[y] + add;
+        }
+        for (uint16_t i = 0; i < count; i++) {
+            uint8_t r, g, b;
+            heatToColor(st, st.fireHeat[i], r, g, b);
+            emit(st, sink, i, r, g, b);
+        }
+    }
+
+    static void fire2D(EffectState& st, IEffectSink& sink) {
+        uint16_t cw = sink.matrixWidth();
+        uint16_t ch = sink.matrixHeight();
+        if (cw == 0 || ch == 0) { fire(st, sink); return; } // same 1D fallback as the Master
+
+        size_t total = (size_t)cw * ch;
+        if (st.fireHeat.size() != total) st.fireHeat.assign(total, 0);
+
+        const uint8_t cooling = 20 + (st.intensity * 80) / 255;
+        for (size_t i = 0; i < total; i++) {
+            uint8_t cooldown = random(0, ((cooling * 10) / cw) + 2);
+            st.fireHeat[i] = (st.fireHeat[i] > cooldown) ? st.fireHeat[i] - cooldown : 0;
+        }
+        // Heat rises within each column; y = 0 is the base row that carries the sparks.
+        for (uint16_t x = 0; x < cw; x++) {
+            for (uint16_t y = ch - 1; y >= 2; y--) {
+                size_t idx = (size_t)y * cw + x;
+                size_t b1 = (size_t)(y - 1) * cw + x;
+                size_t b2 = (size_t)(y - 2) * cw + x;
+                st.fireHeat[idx] = (st.fireHeat[b1] + st.fireHeat[b2] + st.fireHeat[b2]) / 3;
+            }
+        }
+        for (uint16_t x = 0; x < cw; x++) {
+            if (random(0, 255) < 120) {
+                uint16_t add = random(160, 255);
+                st.fireHeat[x] = (st.fireHeat[x] + add > 255) ? 255 : st.fireHeat[x] + add;
+            }
+        }
+        for (uint16_t y = 0; y < ch; y++) {
+            for (uint16_t x = 0; x < cw; x++) {
+                uint8_t r, g, b;
+                heatToColor(st, st.fireHeat[(size_t)y * cw + x], r, g, b);
+                sink.setPixelXY(x, y, r, g, b);
+            }
+        }
+    }
+
+    static void matrixRain(EffectState& st, IEffectSink& sink) {
+        uint16_t cw = sink.matrixWidth();
+        uint16_t ch = sink.matrixHeight();
+        if (cw == 0 || ch == 0) { chase(st, sink); return; } // same 1D fallback as the Master
+
+        if (st.matrixRainHeads.size() != cw) {
+            st.matrixRainHeads.assign(cw, 0);
+            // Stagger the starts so the columns do not all fall in lockstep.
+            for (uint16_t x = 0; x < cw; x++) st.matrixRainHeads[x] = -(int16_t)random(0, ch * 2);
+        }
+
+        for (uint16_t y = 0; y < ch; y++)
+            for (uint16_t x = 0; x < cw; x++) sink.setPixelXY(x, y, 0, 0, 0);
+
+        uint8_t r, g, b; scaled(st.color, bri(st), r, g, b);
+        const int16_t trailLen = 6;
+        for (uint16_t x = 0; x < cw; x++) {
+            int16_t head = st.matrixRainHeads[x];
+            for (int16_t t = 0; t < trailLen; t++) {
+                int16_t y = head - t;
+                if (y >= 0 && y < (int16_t)ch) {
+                    uint8_t fade = trailLen - t; // brightest at the head, fading upward
+                    sink.setPixelXY(x, y, (r * fade) / trailLen, (g * fade) / trailLen, (b * fade) / trailLen);
+                }
+            }
+            head++;
+            if (head - trailLen > (int16_t)ch) head = -(int16_t)random(0, ch);
+            st.matrixRainHeads[x] = head;
+        }
+        st.effectStep++;
+    }
+
+    static void ripple(EffectState& st, IEffectSink& sink) {
+        uint16_t cw = sink.matrixWidth();
+        uint16_t ch = sink.matrixHeight();
+        if (cw == 0 || ch == 0) { bounce(st, sink); return; } // same 1D fallback as the Master
+
+        const uint8_t numRipples = 3;
+        // Origin and radius are a byte each, so canvases past 255px clip - rare and accepted.
+        if (st.rippleState.size() != (size_t)numRipples * 3) {
+            st.rippleState.assign((size_t)numRipples * 3, 0); // radius 0 means inactive
+        }
+
+        for (uint16_t y = 0; y < ch; y++)
+            for (uint16_t x = 0; x < cw; x++) sink.setPixelXY(x, y, 0, 0, 0);
+
+        uint16_t maxRadius = (cw > ch ? cw : ch);
+        uint8_t baseR = (st.color >> 16) & 0xFF;
+        uint8_t baseG = (st.color >> 8) & 0xFF;
+        uint8_t baseB = st.color & 0xFF;
+
+        for (uint8_t rp = 0; rp < numRipples; rp++) {
+            uint8_t base = rp * 3;
+            uint8_t rx = st.rippleState[base];
+            uint8_t ry = st.rippleState[base + 1];
+            uint8_t radius = st.rippleState[base + 2];
+
+            if (radius == 0) {
+                // intensity sets how often a new ripple starts (roughly 2%-18% per frame)
+                if (random(0, 100) < (2 + st.intensity / 16)) {
+                    st.rippleState[base] = (uint8_t)random(0, cw > 255 ? 255 : cw);
+                    st.rippleState[base + 1] = (uint8_t)random(0, ch > 255 ? 255 : ch);
+                    st.rippleState[base + 2] = 1;
+                }
+                continue;
+            }
+
+            for (uint16_t y = 0; y < ch; y++) {
+                for (uint16_t x = 0; x < cw; x++) {
+                    int16_t dx = (int16_t)x - rx;
+                    int16_t dy = (int16_t)y - ry;
+                    uint16_t distSq = (uint16_t)(dx * dx + dy * dy);
+                    uint16_t rSq = (uint16_t)radius * radius;
+                    uint16_t rPrevSq = radius > 1 ? (uint16_t)(radius - 1) * (radius - 1) : 0;
+                    if (distSq <= rSq && distSq > rPrevSq) {
+                        uint8_t fade = 255 - (uint16_t)(radius * 255 / maxRadius);
+                        sink.setPixelXY(x, y, (baseR * bri(st) / 255 * fade) / 255,
+                                              (baseG * bri(st) / 255 * fade) / 255,
+                                              (baseB * bri(st) / 255 * fade) / 255);
+                    }
+                }
+            }
+            radius++;
+            st.rippleState[base + 2] = (radius >= maxRadius) ? 0 : radius;
         }
         st.effectStep++;
     }

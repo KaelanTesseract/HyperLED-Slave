@@ -63,19 +63,10 @@ enum HyperBusCommand {
 // Length of a CMD_SET_SEGMENT payload. Kept as a constant so both sides agree.
 #define HYPERBUS_SEGMENT_PAYLOAD_LEN 17
 
-// Effects a Slave can render on its own. Must match EffectEngine::canRender() - the Master uses
-// this to decide whether to send parameters or fall back to streaming pixels, and getting the two
-// out of step would leave a Slave showing nothing. Effects needing Master-only resources (the
-// image library, and the clock/weather data behind the text effect) are deliberately absent.
-inline bool hyperBusEffectRendersOnSlave(uint8_t effect) {
-    switch (effect) {
-        case 0: case 1: case 2: case 3: case 5: case 6:
-        case 11: case 12: case 13: case 18: case 19: case 20: case 21:
-            return true;
-        default:
-            return false;
-    }
-}
+// Which effects a Slave can render on its own is decided by EffectEngine::canRender() alone.
+// This header deliberately does not carry a second copy of that list: it did, and adding effects
+// to the engine without updating it made the Master stream pixels for effects the Slave could
+// already draw - flooding the link and knocking the Slave offline.
 
 struct HyperBusPacket {
     uint8_t targetId;
