@@ -60,6 +60,13 @@ public:
     // 0 when this sink is a plain strip. 2D effects fall back to a 1D relative in that case.
     virtual uint16_t matrixWidth() const { return 0; }
     virtual uint16_t matrixHeight() const { return 0; }
+    // 2D effects address pixels by coordinate. The default lays the matrix out row by row, which
+    // is what a Slave panel wants. The Master overrides it to draw onto its whole virtual canvas
+    // (its own matrix plus any Slave panels), so a wave pattern flows across panel boundaries
+    // instead of restarting inside each segment.
+    virtual void setPixelXY(uint16_t x, uint16_t y, uint8_t r, uint8_t g, uint8_t b) {
+        setPixel(y * matrixWidth() + x, r, g, b, 0, 0);
+    }
 };
 
 class EffectEngine {
@@ -77,17 +84,28 @@ public:
         }
     }
 
-    // Advances and draws the effect if it is due. Returns true when pixels changed, so the caller
-    // knows whether it needs to push a frame out. Timing matches the Master's loop() exactly.
-    static bool render(EffectState& st, IEffectSink& sink, unsigned long now) {
-        unsigned int delayMs = 500 - ((unsigned int)st.speed * 490 / 255);
-        if (st.effect == 0) delayMs = 100;
-        if (now - st.lastUpdate <= delayMs) return false;
-        st.lastUpdate = now;
+    // How long to wait between frames for a given speed setting. Shared so the Master's loop and
+    // a Slave's own scheduling stay on the same timing.
+    static unsigned int frameDelayMs(const EffectState& st) {
+        if (st.effect == 0) return 100;
+        return 500 - ((unsigned int)st.speed * 490 / 255);
+    }
 
+    // Advances and draws the effect if it is due. Returns true when pixels changed, so the caller
+    // knows whether it needs to push a frame out. Used by Slaves, which have no scheduling of
+    // their own; the Master calls draw() from inside its existing loop instead.
+    static bool render(EffectState& st, IEffectSink& sink, unsigned long now) {
+        if (now - st.lastUpdate <= frameDelayMs(st)) return false;
+        st.lastUpdate = now;
+        draw(st, sink);
+        return true;
+    }
+
+    // Draws one frame unconditionally. The caller owns the timing.
+    static void draw(EffectState& st, IEffectSink& sink) {
         if (!st.isOn) {
             fill(st, sink, 0, 0, 0);
-            return true;
+            return;
         }
 
         switch (st.effect) {
@@ -106,7 +124,6 @@ public:
             case 21: plasma(st, sink); break;
             default: solid(st, sink); break;
         }
-        return true;
     }
 
     static uint32_t wheel(uint8_t pos) {
@@ -118,7 +135,7 @@ public:
     }
 
     static uint32_t paletteColor(uint8_t paletteId, uint8_t pos) {
-        if (paletteId == 0 || paletteId >= PALETTE_COUNT) return 0;
+        if (paletteId == 0 || paletteId >= PALETTE_SLOTS) return 0;
         const PaletteDef& pal = PALETTES[paletteId];
         if (pal.stopCount == 0) return 0;
         if (pal.stopCount == 1) return pal.stops[0];
@@ -138,10 +155,12 @@ public:
     }
 
 private:
-    static const uint8_t PALETTE_COUNT = 5;
+    // Named PALETTE_SLOTS rather than PALETTE_COUNT: the Master defines the latter as a
+    // macro, which would textually replace the member and fail to compile.
+    static const uint8_t PALETTE_SLOTS = 5;
     struct PaletteDef { uint8_t stopCount; uint32_t stops[4]; };
     // Same stops as the Master's PALETTE_STOPS - keep in sync.
-    static const PaletteDef PALETTES[PALETTE_COUNT];
+    static const PaletteDef PALETTES[PALETTE_SLOTS];
 
     // Cheap 0-255 triangle wave, a lightweight stand-in for a sine so effects avoid trig.
     static uint8_t triWave8(uint8_t pos) {
@@ -348,14 +367,14 @@ private:
                 uint8_t pos = (uint8_t)(((uint16_t)v1 + v2 + v3) / 3);
                 uint32_t c = (st.palette == 0) ? wheel(pos) : paletteColor(st.palette, pos);
                 uint8_t r, g, b; scaled(c, bri(st), r, g, b);
-                emit(st, sink, y * w + x, r, g, b);
+                sink.setPixelXY(x, y, r, g, b);
             }
         }
         st.effectStep++;
     }
 };
 
-inline const EffectEngine::PaletteDef EffectEngine::PALETTES[EffectEngine::PALETTE_COUNT] = {
+inline const EffectEngine::PaletteDef EffectEngine::PALETTES[EffectEngine::PALETTE_SLOTS] = {
     {0, {}},                                            // Solid (unused)
     {4, {0xFF0000, 0xFFFF00, 0x00FF00, 0x0000FF}},      // Rainbow
     {3, {0x000000, 0xFF4500, 0xFFFF00}},                // Fire
