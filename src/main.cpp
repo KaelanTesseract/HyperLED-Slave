@@ -321,16 +321,32 @@ static SlaveSink slaveSink;
 static volatile bool forceRender = false;
 
 static void sendPong(bool wireless) {
-    // PONG Payload: [LED Count L] [LED Count H] [Version Length] [Version String...] [Name...]
+    // PONG Payload: [LED Count L] [LED Count H] [Version Length] [Version String...]
+    //               [ledType] [matrixW L] [matrixW H] [matrixH L] [matrixH H] [shiftDriver]
+    //               [Name...]
+    //
+    // The six configuration bytes were added in 0.2.001. Everything a Slave was told is stored
+    // here and nowhere else, so without reporting it back the Master could not tell a HUB75
+    // panel from a strip - the web UI then showed its default LED type, and saving anything on
+    // that page silently pushed that default back over the real configuration. The Master keys
+    // off the version string it parses first, so older Slaves that stop after the version are
+    // still read correctly.
     uint8_t verLen = slaveVersion.length();
-    uint16_t len = 2 + 1 + verLen + slaveName.length();
+    uint16_t len = 2 + 1 + verLen + 6 + slaveName.length();
     uint8_t* payload = (uint8_t*)malloc(len);
     if (!payload) return;
     payload[0] = ledCount & 0xFF;
     payload[1] = (ledCount >> 8) & 0xFF;
     payload[2] = verLen;
     memcpy(&payload[3], slaveVersion.c_str(), verLen);
-    memcpy(&payload[3 + verLen], slaveName.c_str(), slaveName.length());
+    uint16_t o = 3 + verLen;
+    payload[o]     = ledType;
+    payload[o + 1] = matrixWidth & 0xFF;
+    payload[o + 2] = (matrixWidth >> 8) & 0xFF;
+    payload[o + 3] = matrixHeight & 0xFF;
+    payload[o + 4] = (matrixHeight >> 8) & 0xFF;
+    payload[o + 5] = hub75ShiftDriver;
+    memcpy(&payload[o + 6], slaveName.c_str(), slaveName.length());
 
     if (wireless) espBus.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_PONG, payload, len);
     else busUp.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_PONG, payload, len);
