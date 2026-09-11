@@ -125,7 +125,14 @@ bool EspNowBusClass::sendPacket(uint8_t targetId, uint8_t senderId, uint8_t comm
         uint16_t offset = 0;
         while (offset < length) {
             uint16_t chunkSize = length - offset;
-            if (chunkSize > 240) chunkSize = 240;
+            if (chunkSize > 240) chunkSize = 240; // 240 is exactly 48 pixels, so never mid-pixel
+
+            // The offset travels as a PIXEL index, because that is what the receiver writes.
+            // It used to be sent as the byte position, so every chunk after the first landed five
+            // times too far into the strip and everything past a fifth of the way was dropped as
+            // out of range - a 64x64 panel came out scrambled, while segments small enough to fit
+            // in a single chunk were unaffected and hid the problem.
+            uint16_t pixelOffset = offset / HYPERBUS_LED_BYTES_PER_PIXEL;
 
             uint16_t packetLen = HYPERBUS_ESPNOW_HEADER + 2 + chunkSize; // + offsetL, offsetH
             _txBuffer[0] = HYPERBUS_ESPNOW_MAGIC0;
@@ -134,8 +141,8 @@ bool EspNowBusClass::sendPacket(uint8_t targetId, uint8_t senderId, uint8_t comm
             _txBuffer[3] = senderId;
             _txBuffer[4] = CMD_SET_LEDS_CHUNK;
             _txBuffer[5] = (uint8_t)(chunkSize + 2); // payload length includes the offset field
-            _txBuffer[6] = offset & 0xFF;
-            _txBuffer[7] = (offset >> 8) & 0xFF;
+            _txBuffer[6] = pixelOffset & 0xFF;
+            _txBuffer[7] = (pixelOffset >> 8) & 0xFF;
 
             memcpy(&_txBuffer[HYPERBUS_ESPNOW_HEADER + 2], &payload[offset], chunkSize);
 

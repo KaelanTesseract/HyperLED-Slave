@@ -66,6 +66,11 @@ enum HyperBusCommand {
     CMD_SET_SEGMENT = 0x08
 };
 
+// Bytes per pixel in a CMD_SET_LEDS payload (r, g, b, w, w2). CMD_SET_LEDS_CHUNK carries a
+// pixel index as its offset, not a byte position - the receiver writes LEDs, so anything else
+// puts the chunks in the wrong place.
+#define HYPERBUS_LED_BYTES_PER_PIXEL 5
+
 // Length of a CMD_SET_SEGMENT payload. Kept as a constant so both sides agree.
 #define HYPERBUS_SEGMENT_PAYLOAD_LEN 19
 
