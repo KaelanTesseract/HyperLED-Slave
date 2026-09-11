@@ -218,10 +218,12 @@ private:
 
     static uint16_t bri(const EffectState& st) { return st.brightness; }
 
+    // Rounds rather than truncates. Truncation always biases a scaled colour downwards, and it
+    // does so unevenly across channels, which tints a colour as it is dimmed.
     static void scaled(uint32_t c, uint16_t b, uint8_t& r, uint8_t& g, uint8_t& bl) {
-        r = (((c >> 16) & 0xFF) * b) / 255;
-        g = (((c >> 8) & 0xFF) * b) / 255;
-        bl = ((c & 0xFF) * b) / 255;
+        r = (uint8_t)(((((c >> 16) & 0xFF) * b) + 127) / 255);
+        g = (uint8_t)(((((c >> 8) & 0xFF) * b) + 127) / 255);
+        bl = (uint8_t)((((c & 0xFF) * b) + 127) / 255);
     }
 
     static void solid(EffectState& st, IEffectSink& sink) {
