@@ -78,9 +78,17 @@ void EspNowBusClass::loop() {
         // Locking onto the Master's channel is not permanent: if the Master reboots and
         // rejoins its router on a different channel, a permanently locked Slave would keep
         // listening on the old one and never be seen again until someone power-cycles it.
-        // The Master pings every 250ms, so several seconds of silence means the channel is
-        // stale - go back to scanning.
-        if (millis() - _lastPingReceived > 5000) {
+        // The Master pings every 250ms, so prolonged silence means the channel is stale - go
+        // back to scanning.
+        //
+        // The threshold used to be 5s, which was tighter than the 15s the Master allows a Slave
+        // before forgetting it. Any hiccup longer than five seconds on the Master therefore cost
+        // the Slave its channel lock, and re-acquiring it means sweeping all 13 channels at
+        // 500ms each - so a brief stall turned into a visible outage of several seconds, plus
+        // the reconfiguration that follows rediscovery. Matching the Master's own tolerance
+        // keeps the two sides symmetric: a real channel change is still caught, a transient one
+        // is ridden out.
+        if (millis() - _lastPingReceived > MASTER_LOST_TIMEOUT_MS) {
             Serial.println("EspNowBus: lost the Master, scanning channels again");
             _locked = false;
             _lastPingReceived = millis();

@@ -28,6 +28,11 @@
 #include <array>
 
 class EspNowBusClass : public BusInterface {
+    // How long the Master may stay silent before the Slave gives up its channel lock. Kept in
+    // step with the Master's own 15s slave timeout (SlaveManager) so neither side drops the
+    // other first over a momentary stall.
+    static const unsigned long MASTER_LOST_TIMEOUT_MS = 15000;
+
 public:
     EspNowBusClass();
     
