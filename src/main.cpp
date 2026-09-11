@@ -320,6 +320,12 @@ static SlaveSink slaveSink;
 // instead of waiting for our own frame timer.
 static volatile bool forceRender = false;
 
+// A frame arrives as dozens of chunks. Pushing the strip out from the receive callback on every
+// one of them blocks that callback for the whole transfer, and the chunks arriving meanwhile are
+// dropped - always the later ones, which are the lower right of a panel. loop() pushes once
+// instead, so receiving stays cheap and the whole frame lands.
+static volatile bool pendingShow = false;
+
 static void sendPong(bool wireless) {
     // PONG Payload: [LED Count L] [LED Count H] [Version Length] [Version String...]
     //               [ledType] [matrixW L] [matrixW H] [matrixH L] [matrixH H] [shiftDriver]
@@ -501,7 +507,7 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
                       uint8_t w2 = packet.payload[i * 5 + 4];
                       strip->SetPixelColor(i, r, g, b, w, w2);
                   }
-                  strip->Show();
+                  pendingShow = true;
               }
           }
         else if (packet.command == CMD_SET_LEDS_CHUNK) {
@@ -526,7 +532,7 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
                       uint8_t w2 = packet.payload[2 + i * 5 + 4];
                       strip->SetPixelColor(offset + i, r, g, b, w, w2);
                   }
-                  strip->Show();
+                  pendingShow = true;
               }
           }
         else if (packet.command == CMD_TRIGGER_UPDATE) {
@@ -632,6 +638,12 @@ void loop() {
     // Draw locally when the Master has handed us effect parameters. EffectEngine::render() does
     // its own speed timing and reports whether anything actually changed, so an idle effect
     // costs nothing and the panel is only pushed when there is a new frame.
+    // Push a streamed frame once, outside the receive callback (see pendingShow).
+    if (pendingShow && strip) {
+        pendingShow = false;
+        strip->Show();
+    }
+
     if (localRenderActive && strip) {
         if (forceRender) {
             forceRender = false;
