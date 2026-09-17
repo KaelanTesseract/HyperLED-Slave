@@ -20,7 +20,7 @@
 
 #include <Arduino.h>
 
-#define HYPERLED_VERSION "0.2.006"
+#define HYPERLED_VERSION "0.2.007"
 
 // --- Preferences Namespaces & Keys ---
 #define PREF_NAMESPACE "wled_clone"

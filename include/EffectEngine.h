@@ -84,6 +84,29 @@ public:
     }
 };
 
+// Renders into a plain RGB buffer (w x h, row by row). A panel's background effect is drawn into
+// one of these first, and the elements are then composed over a copy of it.
+class RgbFrameSink : public IEffectSink {
+public:
+    uint8_t* rgb = nullptr;
+    uint16_t w = 0;
+    uint16_t h = 0;
+    void setPixel(uint16_t index, uint8_t r, uint8_t g, uint8_t b, uint8_t, uint8_t) override {
+        if (!rgb || index >= (uint32_t)w * h) return;
+        size_t o = (size_t)index * 3;
+        rgb[o] = r;
+        rgb[o + 1] = g;
+        rgb[o + 2] = b;
+    }
+    void setPixelXY(uint16_t x, uint16_t y, uint8_t r, uint8_t g, uint8_t b) override {
+        if (x >= w || y >= h) return;
+        setPixel((uint16_t)(y * w + x), r, g, b, 0, 0);
+    }
+    uint16_t pixelCount() const override { return (uint16_t)(w * h); }
+    uint16_t matrixWidth() const override { return w; }
+    uint16_t matrixHeight() const override { return h; }
+};
+
 class EffectEngine {
 public:
     // Whether this effect can be rendered without the Master. Effects needing resources only the

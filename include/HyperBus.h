@@ -86,7 +86,9 @@ enum HyperBusCommand {
     //
     // With flag ENTRY_BRIGHTNESS the entries are followed by one byte per entry, in entry order:
     // that element's own brightness (255 = as bright as the segment). It sits behind the entries
-    // so a Slave older than 0.2.006, which reads only `count` entries, simply ignores it.
+    // so a Slave older than 0.2.006, which reads only `count` entries, simply ignores it. With flag
+    // ENTRY_LEGIBILITY another byte per entry follows, how the element stays readable in front of
+    // a background effect (see CMD_SET_BACKGROUND and WidgetRender::LEGIBLE_*, 0.2.007 and later).
     CMD_SET_WIDGETS = 0x09,
     // The Master's local wall-clock time, broadcast every few seconds while a Slave draws time
     // elements. Payload (HYPERBUS_TIME_PAYLOAD_LEN): [flags] [epoch 4 bytes, little endian]
@@ -107,7 +109,15 @@ enum HyperBusCommand {
     // Slave -> Master: "send me image `id` with these pixels". Payload
     // (HYPERBUS_IMAGE_REQUEST_LEN): [id] [crc 4 bytes]. The Master only answers if its image still
     // has that crc; an edited image reaches the Slave through the next CMD_SET_WIDGETS instead.
-    CMD_REQUEST_WIDGET_IMAGE = 0x0D
+    CMD_REQUEST_WIDGET_IMAGE = 0x0D,
+    // The effect a Slave draws behind its "Uhr / Text" elements (Slaves 0.2.007 and later; older
+    // ones ignore the command). Payload (HYPERBUS_BACKGROUND_PAYLOAD_LEN): [effect] [brightness]
+    // [speed] [intensity] [palette] [flags] [r][g][b] [r2][g2][b2]. effect
+    // HYPERBUS_BACKGROUND_NONE: no background. brightness is relative to the segment's, like the elements'
+    // own (255 = as bright as the segment), flags bit0: second colour enabled. Only drawn while the Slave owns the
+    // whole panel (no MASTER_LAYER) - a moving background cannot be streamed. Sent next to
+    // CMD_SET_WIDGETS, on change plus the same periodic refresh.
+    CMD_SET_BACKGROUND = 0x0E
 };
 
 // Bytes per pixel in a CMD_SET_LEDS payload (r, g, b, w, w2). CMD_SET_LEDS_CHUNK carries a
@@ -144,6 +154,11 @@ enum HyperBusCommand {
 #define HYPERBUS_WIDGET_FLAG_ALL_TYPES    0x08
 // Per-element brightness bytes follow the entries (see CMD_SET_WIDGETS).
 #define HYPERBUS_WIDGET_FLAG_ENTRY_BRIGHTNESS 0x10
+// Per-element legibility bytes (WidgetRender::LEGIBLE_*) follow the brightness bytes, one per entry.
+#define HYPERBUS_WIDGET_FLAG_ENTRY_LEGIBILITY 0x20
+
+#define HYPERBUS_BACKGROUND_PAYLOAD_LEN 12
+#define HYPERBUS_BACKGROUND_NONE 255
 #define HYPERBUS_WIDGETS_MAX_PAYLOAD 240
 
 #define HYPERBUS_TIME_PAYLOAD_LEN 7

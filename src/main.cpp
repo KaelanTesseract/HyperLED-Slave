@@ -313,6 +313,7 @@ struct LocalWidget {
     uint8_t height = 0; // image height
     uint32_t crc = 0;   // image pixels this element should show (0 = none)
     uint8_t bri = 255;  // the element's own brightness, on top of the segment's
+    uint8_t legible = WidgetRender::LEGIBLE_OUTLINE; // how it stays readable over the background
     String text;
 };
 static const uint8_t LOCAL_WIDGET_MAX = 12; // the Master's TEXT_WIDGET_MAX
@@ -548,6 +549,23 @@ static uint16_t frameH = 0;
 // we own instead of only the changed ones.
 static volatile bool shownValid = false;
 
+// The effect behind the elements (CMD_SET_BACKGROUND). Drawn only while the whole panel is ours.
+// bgRgb keeps the effect's last frame - effects may leave pixels they did not change - and each
+// composed frame starts from a copy of it. Owned by loop(); the receive path only hands over the
+// payload (pendingBackground, under widgetMux).
+static EffectState bgState;
+static bool bgActive = false;
+static uint8_t bgBrightness = 255;     // relative to the elements
+static uint8_t* bgRgb = nullptr;
+static uint8_t* composeMask = nullptr;
+static uint16_t bgW = 0;
+static uint16_t bgH = 0;
+static unsigned long lastBgFrame = 0;
+static uint8_t pendingBackground[HYPERBUS_BACKGROUND_PAYLOAD_LEN];
+static bool pendingBackgroundConfig = false;
+// Faster than this the composition gains nothing visible, and the panel has to be rewritten each time.
+static const unsigned long BG_MIN_FRAME_MS = 20;
+
 static uint8_t* allocPixels(size_t bytes) {
     uint8_t* p = (uint8_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!p) p = (uint8_t*)malloc(bytes);
@@ -572,6 +590,90 @@ static bool ensureFrame() {
     frameW = matrixWidth;
     frameH = matrixHeight;
     shownValid = false;
+    return true;
+}
+
+static bool ensureBackgroundBuffers() {
+    if (!ensureFrame()) return false;
+    if (bgRgb && composeMask && bgW == frameW && bgH == frameH) return true;
+    if (bgRgb) free(bgRgb);
+    if (composeMask) free(composeMask);
+    size_t px = (size_t)frameW * frameH;
+    bgRgb = allocPixels(px * 3);
+    composeMask = allocPixels(px);
+    if (!bgRgb || !composeMask) {
+        if (bgRgb) free(bgRgb);
+        if (composeMask) free(composeMask);
+        bgRgb = composeMask = nullptr;
+        bgW = bgH = 0;
+        return false;
+    }
+    memset(bgRgb, 0, px * 3);
+    bgW = frameW;
+    bgH = frameH;
+    bgState = EffectState(); // its per-pixel memory belongs to the old size
+    lastBgFrame = 0;
+    return true;
+}
+
+// Whether a background is to be drawn right now.
+static bool backgroundShown() {
+    return bgActive && localWidgetsActive && localWidgetsOn && !localWidgetsMasterLayer &&
+           ledType == TYPE_HUB75;
+}
+
+// Applies a CMD_SET_BACKGROUND payload. Runs in loop() only.
+static void applyBackgroundConfig(const uint8_t* p) {
+    uint8_t effect = p[0];
+    bool active = effect != HYPERBUS_BACKGROUND_NONE && EffectEngine::canRender(effect);
+    uint32_t color = ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 8) | p[8];
+    uint32_t color2 = ((uint32_t)p[9] << 16) | ((uint32_t)p[10] << 8) | p[11];
+    bool color2Enabled = (p[5] & 0x01) != 0;
+    bool changed = active != bgActive;
+    if (active) {
+        changed = changed || bgState.effect != effect || bgBrightness != p[1] ||
+                  bgState.speed != p[2] || bgState.intensity != p[3] || bgState.palette != p[4] ||
+                  bgState.color != color || bgState.color2 != color2 ||
+                  bgState.color2Enabled != color2Enabled;
+    }
+    if (!changed) return; // the periodic refresh
+
+    if (active && bgState.effect != effect) {
+        bgState = EffectState(); // a different effect starts from a clean state
+        if (bgRgb) memset(bgRgb, 0, (size_t)bgW * bgH * 3);
+        lastBgFrame = 0;
+    }
+    if (active) {
+        bgState.effect = effect;
+        bgBrightness = p[1];
+        bgState.speed = p[2];
+        bgState.intensity = p[3];
+        bgState.palette = p[4];
+        bgState.isOn = true;
+        bgState.color = color;
+        bgState.color2 = color2;
+        bgState.color2Enabled = color2Enabled;
+        bgState.whiteOnly = false;
+        bgState.cct = 128;
+    }
+    bgActive = active;
+    localWidgetsDirty = true;
+    Serial.printf("Background: %s\n", active ? String(effect).c_str() : "off");
+}
+
+// Advances the background effect when it is due. Returns true when it drew a new frame.
+static bool advanceBackground(unsigned long now) {
+    if (!backgroundShown() || !ensureBackgroundBuffers()) return false;
+    if (lastBgFrame != 0 && now - lastBgFrame < BG_MIN_FRAME_MS) return false;
+    // Relative to the segment, like an element's own brightness: the whole panel is dimmed by the
+    // driver on top (see updatePanelBrightness()).
+    bgState.brightness = bgBrightness;
+    RgbFrameSink sink;
+    sink.rgb = bgRgb;
+    sink.w = bgW;
+    sink.h = bgH;
+    if (!EffectEngine::render(bgState, sink, now)) return false;
+    lastBgFrame = now;
     return true;
 }
 
@@ -610,6 +712,28 @@ static void renderLocalWidgets(unsigned long now) {
     rectCount = widgetRectCount;
     if (rectCount > 0) memcpy(rects, widgetRects, sizeof(WidgetRect) * rectCount);
     portEXIT_CRITICAL(&widgetMux);
+
+    // Over a background effect: start from its frame and let each element keep itself readable.
+    if (whole && backgroundShown() && ensureBackgroundBuffers()) {
+        memcpy(frameRgb, bgRgb, (size_t)frameW * frameH * 3);
+        WidgetRender::Clock clk = currentClock();
+        WidgetRender::Weather wx = currentWeather();
+        const std::vector<LocalWidget>& list = localWidgets;
+        WidgetRender::composeOver(frameRgb, composeMask, frameW, frameH, list.size(),
+                                  [&](size_t i) { return specOf(list[i]); },
+                                  [&](size_t i) { return list[i].legible; },
+                                  255, clk, wx, now);
+        bool all = !shownValid;
+        shownValid = true;
+        uint32_t written = 0;
+        for (uint16_t y = 0; y < frameH; y++) {
+            for (uint16_t x = 0; x < frameW; x++) {
+                if (flushPixel(x, y, all)) written++;
+            }
+        }
+        if (written > 0) strip->Show();
+        return;
+    }
 
     // 1. clear what we own
     if (whole) {
@@ -784,7 +908,7 @@ static bool sameLocalWidgets(const std::vector<LocalWidget>& a, const std::vecto
         if (p.id != q.id || p.type != q.type || p.x != q.x || p.y != q.y || p.color != q.color ||
             p.scale != q.scale || p.format != q.format || p.font != q.font || p.speed != q.speed ||
             p.width != q.width || p.height != q.height || p.crc != q.crc || p.bri != q.bri ||
-            p.text != q.text) {
+            p.legible != q.legible || p.text != q.text) {
             return false;
         }
     }
@@ -861,6 +985,14 @@ static void applyWidgetConfig(const uint8_t* p, uint16_t length) {
     if ((flags & HYPERBUS_WIDGET_FLAG_ENTRY_BRIGHTNESS) && count <= LOCAL_WIDGET_MAX &&
         parsed.size() == count && off + count <= length) {
         for (uint8_t i = 0; i < count; i++) parsed[i].bri = p[off + i];
+        off += count;
+        // How each element stays readable over the background, right behind the brightness.
+        if ((flags & HYPERBUS_WIDGET_FLAG_ENTRY_LEGIBILITY) && off + count <= length) {
+            for (uint8_t i = 0; i < count; i++) {
+                uint8_t legible = p[off + i];
+                parsed[i].legible = legible <= WidgetRender::LEGIBLE_MAX ? legible : WidgetRender::LEGIBLE_OUTLINE;
+            }
+        }
     }
 
     bool wasActive = localWidgetsActive;
@@ -1096,6 +1228,15 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
                 portEXIT_CRITICAL(&widgetMux);
                 lastWidgetPacketAt = millis();
                 widgetsOverEspNow = packet.isWireless;
+            }
+        }
+        else if (packet.command == CMD_SET_BACKGROUND) {
+            // Handed to loop() like the widget config.
+            if (packet.length >= HYPERBUS_BACKGROUND_PAYLOAD_LEN) {
+                portENTER_CRITICAL(&widgetMux);
+                memcpy(pendingBackground, packet.payload, HYPERBUS_BACKGROUND_PAYLOAD_LEN);
+                pendingBackgroundConfig = true;
+                portEXIT_CRITICAL(&widgetMux);
             }
         }
         else if (packet.command == CMD_SET_TIME) {
@@ -1368,6 +1509,17 @@ void loop() {
         }
         portEXIT_CRITICAL(&widgetMux);
         if (widgetLen > 0) applyWidgetConfig(widgetPayload, widgetLen);
+
+        uint8_t bgPayload[HYPERBUS_BACKGROUND_PAYLOAD_LEN];
+        bool bgPending = false;
+        portENTER_CRITICAL(&widgetMux);
+        if (pendingBackgroundConfig) {
+            memcpy(bgPayload, pendingBackground, sizeof(bgPayload));
+            pendingBackgroundConfig = false;
+            bgPending = true;
+        }
+        portEXIT_CRITICAL(&widgetMux);
+        if (bgPending) applyBackgroundConfig(bgPayload);
     }
 
     if (localWidgetsActive) {
@@ -1396,7 +1548,8 @@ void loop() {
         }
         static unsigned long lastWidgetFrame = 0;
         unsigned long interval = animated ? 50 : 250;
-        if (localWidgetsDirty || now - lastWidgetFrame >= interval) {
+        bool backgroundMoved = advanceBackground(now);
+        if (localWidgetsDirty || backgroundMoved || now - lastWidgetFrame >= interval) {
             localWidgetsDirty = false;
             lastWidgetFrame = now;
             renderLocalWidgets(now);

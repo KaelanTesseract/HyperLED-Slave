@@ -48,6 +48,15 @@ static const uint8_t TYPE_MARQUEE = 6;
 
 static const uint8_t SCALE_MAX = 8;
 
+// How an element stays readable in front of a background effect.
+static const uint8_t LEGIBLE_NONE = 0;     // drawn straight onto the effect
+static const uint8_t LEGIBLE_OUTLINE = 1;  // a dark ring, one pixel wide, around every lit pixel
+static const uint8_t LEGIBLE_BOX = 2;      // the effect is darkened behind the element's area
+static const uint8_t LEGIBLE_MAX = 2;
+
+// Image pixels with every channel below this are not drawn (see draw()).
+static const uint8_t IMAGE_TRANSPARENT_BELOW = 12;
+
 // One element, independent of how either side stores it.
 struct Spec {
     uint8_t type;
@@ -405,6 +414,13 @@ inline void draw(const Spec& s, uint8_t bri, uint16_t cw, uint16_t ch, const Clo
         for (uint16_t iy = 0; iy < s.height; iy++) {
             for (uint16_t ix = 0; ix < s.width; ix++) {
                 size_t off = ((size_t)iy * s.width + ix) * 3;
+                // Black is see-through, and so is the near-black noise many converted pictures
+                // carry: invisible on a dark panel, it would show as a solid square over a
+                // background effect.
+                if (s.img[off] < IMAGE_TRANSPARENT_BELOW && s.img[off + 1] < IMAGE_TRANSPARENT_BELOW &&
+                    s.img[off + 2] < IMAGE_TRANSPARENT_BELOW) {
+                    continue;
+                }
                 uint8_t pr = (uint16_t)s.img[off] * bri / 255;
                 uint8_t pg = (uint16_t)s.img[off + 1] * bri / 255;
                 uint8_t pb = (uint16_t)s.img[off + 2] * bri / 255;
@@ -478,6 +494,80 @@ inline void draw(const Spec& s, uint8_t bri, uint16_t cw, uint16_t ch, const Clo
     if (len == 0 || !text) return;
     Glyphs gl = glyphs(s.font);
     drawTextRun(text, len, s.x, s.y, gl, scale, cw, ch, r, g, b, plot);
+}
+
+// Draws elements over a background that is already in `frame` (RGB, cw x ch). First every
+// element darkens its surroundings as its legibility setting says, then all of them are drawn -
+// clearing everything first keeps one element's ring from cutting into its neighbour.
+// specAt(i) / legibleAt(i) give element i; `mask` is cw * ch bytes of scratch space.
+template <typename SpecAt, typename LegibleAt>
+inline void composeOver(uint8_t* frame, uint8_t* mask, uint16_t cw, uint16_t ch, size_t count,
+                        SpecAt specAt, LegibleAt legibleAt, uint8_t bri, const Clock& clk,
+                        const Weather& wx, unsigned long nowMs) {
+    if (!frame || !mask || cw == 0 || ch == 0) return;
+    const uint8_t LIT = 1, BLACK = 2, DIM = 4;
+    size_t px = (size_t)cw * ch;
+    memset(mask, 0, px);
+    bool any = false;
+    for (size_t i = 0; i < count; i++) {
+        uint8_t legible = legibleAt(i);
+        if (legible == LEGIBLE_NONE || legible > LEGIBLE_MAX) continue;
+        Spec s = specAt(i);
+        any = true;
+        if (legible == LEGIBLE_BOX) {
+            Rect r = bounds(s);
+            for (int32_t y = (int32_t)r.y - 1; y <= (int32_t)r.y + r.h; y++) {
+                if (y < 0 || y >= (int32_t)ch) continue;
+                for (int32_t x = (int32_t)r.x - 1; x <= (int32_t)r.x + r.w; x++) {
+                    if (x < 0 || x >= (int32_t)cw) continue;
+                    mask[(size_t)y * cw + x] |= DIM;
+                }
+            }
+        } else {
+            auto mark = [&](int16_t x, int16_t y, uint8_t, uint8_t, uint8_t) {
+                mask[(size_t)y * cw + x] |= LIT;
+            };
+            draw(s, 255, cw, ch, clk, wx, nowMs, mark);
+        }
+    }
+    if (any) {
+        // The ring: every neighbour of a lit pixel goes dark.
+        for (uint16_t y = 0; y < ch; y++) {
+            for (uint16_t x = 0; x < cw; x++) {
+                if (!(mask[(size_t)y * cw + x] & LIT)) continue;
+                for (int dy = -1; dy <= 1; dy++) {
+                    int32_t ny = (int32_t)y + dy;
+                    if (ny < 0 || ny >= (int32_t)ch) continue;
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int32_t nx = (int32_t)x + dx;
+                        if (nx < 0 || nx >= (int32_t)cw) continue;
+                        mask[(size_t)ny * cw + nx] |= BLACK;
+                    }
+                }
+            }
+        }
+        for (size_t p = 0; p < px; p++) {
+            uint8_t m = mask[p];
+            if (m & BLACK) {
+                frame[p * 3] = frame[p * 3 + 1] = frame[p * 3 + 2] = 0;
+            } else if (m & DIM) {
+                // A box keeps a trace of the effect - an eighth - so it reads as a dark panel,
+                // not a hole.
+                frame[p * 3] >>= 3;
+                frame[p * 3 + 1] >>= 3;
+                frame[p * 3 + 2] >>= 3;
+            }
+        }
+    }
+    auto plot = [&](int16_t x, int16_t y, uint8_t r, uint8_t g, uint8_t b) {
+        size_t o = ((size_t)y * cw + x) * 3;
+        frame[o] = r;
+        frame[o + 1] = g;
+        frame[o + 2] = b;
+    };
+    for (size_t i = 0; i < count; i++) {
+        draw(specAt(i), bri, cw, ch, clk, wx, nowMs, plot);
+    }
 }
 
 } // namespace WidgetRender
