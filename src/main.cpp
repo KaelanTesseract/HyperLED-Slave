@@ -312,6 +312,7 @@ struct LocalWidget {
     uint8_t width = 0;  // image width, analog diameter or Lauftext window
     uint8_t height = 0; // image height
     uint32_t crc = 0;   // image pixels this element should show (0 = none)
+    uint8_t bri = 255;  // the element's own brightness, on top of the segment's
     String text;
 };
 static const uint8_t LOCAL_WIDGET_MAX = 12; // the Master's TEXT_WIDGET_MAX
@@ -485,6 +486,7 @@ static WidgetRender::Spec specOf(const LocalWidget& tw) {
     spec.textLen = (uint16_t)tw.text.length();
     spec.img = nullptr;
     spec.imgLen = 0;
+    spec.bri = tw.bri;
     if (tw.type == WidgetRender::TYPE_IMAGE && tw.crc != 0) {
         const SlaveImage* img = readyImage(tw.id, tw.crc);
         if (img) {
@@ -781,7 +783,8 @@ static bool sameLocalWidgets(const std::vector<LocalWidget>& a, const std::vecto
         const LocalWidget& q = b[i];
         if (p.id != q.id || p.type != q.type || p.x != q.x || p.y != q.y || p.color != q.color ||
             p.scale != q.scale || p.format != q.format || p.font != q.font || p.speed != q.speed ||
-            p.width != q.width || p.height != q.height || p.crc != q.crc || p.text != q.text) {
+            p.width != q.width || p.height != q.height || p.crc != q.crc || p.bri != q.bri ||
+            p.text != q.text) {
             return false;
         }
     }
@@ -852,6 +855,12 @@ static void applyWidgetConfig(const uint8_t* p, uint16_t length) {
         w.text = String(textBuf);
         off += textLen;
         parsed.push_back(std::move(w));
+    }
+    // Each element's own brightness, behind the entries. Only as many as were parsed: a list cut
+    // short above leaves the rest at full.
+    if ((flags & HYPERBUS_WIDGET_FLAG_ENTRY_BRIGHTNESS) && count <= LOCAL_WIDGET_MAX &&
+        parsed.size() == count && off + count <= length) {
+        for (uint8_t i = 0; i < count; i++) parsed[i].bri = p[off + i];
     }
 
     bool wasActive = localWidgetsActive;

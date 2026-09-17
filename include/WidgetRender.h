@@ -64,6 +64,7 @@ struct Spec {
     uint16_t textLen;
     const uint8_t* img;    // RGB triplets, width * height * 3 bytes
     size_t imgLen;
+    uint8_t bri = 255;     // the element's own brightness, on top of the segment's
 };
 
 // The local wall-clock time to draw, already in the Master's time zone.
@@ -290,6 +291,11 @@ template <typename Plot>
 inline void draw(const Spec& s, uint8_t bri, uint16_t cw, uint16_t ch, const Clock& clk,
                  const Weather& wx, unsigned long nowMs, Plot plot) {
     if (cw == 0 || ch == 0) return;
+    if (s.bri < 255) {
+        // Rounded, and never down to nothing while both are on: a dimmed element stays visible.
+        uint16_t both = ((uint16_t)bri * s.bri + 127) / 255;
+        bri = (both == 0 && bri > 0 && s.bri > 0) ? 1 : (uint8_t)both;
+    }
     uint8_t scale = clampScale(s.scale);
     uint8_t r = dim(s.color, 16, bri);
     uint8_t g = dim(s.color, 8, bri);

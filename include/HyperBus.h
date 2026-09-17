@@ -83,6 +83,10 @@ enum HyperBusCommand {
     // with CMD_REQUEST_WIDGET_IMAGE). `crc` identifies an image's pixels (0 = none); the others
     // leave it 0. `width` is the image width, the analog clock's diameter or the Lauftext window;
     // `height` is the image height. Sent on change plus a periodic refresh.
+    //
+    // With flag ENTRY_BRIGHTNESS the entries are followed by one byte per entry, in entry order:
+    // that element's own brightness (255 = as bright as the segment). It sits behind the entries
+    // so a Slave older than 0.2.006, which reads only `count` entries, simply ignores it.
     CMD_SET_WIDGETS = 0x09,
     // The Master's local wall-clock time, broadcast every few seconds while a Slave draws time
     // elements. Payload (HYPERBUS_TIME_PAYLOAD_LEN): [flags] [epoch 4 bytes, little endian]
@@ -138,6 +142,8 @@ enum HyperBusCommand {
 // Entries use layout 2 and may be of any type (see CMD_SET_WIDGETS). Only ever sent to Slaves that
 // understand it: an older Slave would read the longer entries with the old layout.
 #define HYPERBUS_WIDGET_FLAG_ALL_TYPES    0x08
+// Per-element brightness bytes follow the entries (see CMD_SET_WIDGETS).
+#define HYPERBUS_WIDGET_FLAG_ENTRY_BRIGHTNESS 0x10
 #define HYPERBUS_WIDGETS_MAX_PAYLOAD 240
 
 #define HYPERBUS_TIME_PAYLOAD_LEN 7
