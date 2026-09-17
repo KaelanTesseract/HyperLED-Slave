@@ -63,6 +63,9 @@ const String slaveVersion = SOFTWARE_VERSION;
 
 // LED Strip (dynamically allocated)
 IBus* strip = nullptr;
+// What a HUB75 panel's driver was last set to (see updatePanelBrightness()); 255 is what a freshly
+// created driver starts with.
+static uint8_t panelBrightnessApplied = 255;
 
 // Pending OTA state
 bool pendingOta = false;
@@ -85,7 +88,9 @@ void initLEDs() {
                 // Fixed 14-pin wiring (Config.h) instead of ledPin/ledPin2; matrixWidth x
                 // matrixHeight instead of ledCount (kept in sync with ledCount by the
                 // CMD_SET_CONFIG handler below, so CMD_SET_LEDS's bounds-check still works).
-                strip = new BusHub75(matrixWidth, matrixHeight, (Hub75ShiftDriver)hub75ShiftDriver); break;
+                strip = new BusHub75(matrixWidth, matrixHeight, (Hub75ShiftDriver)hub75ShiftDriver);
+                panelBrightnessApplied = 255;
+                break;
             case TYPE_WS2812_RGB:
                 strip = new BusDigitalRgb<NeoGrbFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
             case TYPE_SK6812_RGBW:
@@ -283,6 +288,9 @@ static volatile bool pendingConfigApply = false;
 // rendering back off, so effects the Slave cannot render (image, clock/text) keep working.
 static EffectState localEffect;
 static bool localRenderActive = false;
+// The brightness the Master asked for. On a HUB75 panel the effect is rendered at full scale and
+// this goes to the panel driver instead (see updatePanelBrightness()).
+static uint8_t localEffectBrightness = 255;
 
 // Local rendering of the "Uhr / Text" elements the Master handed to this Slave (see
 // CMD_SET_WIDGETS in HyperBus.h) - since 0.2.004 every type: clock, date, text, image, analog
@@ -630,7 +638,10 @@ static void renderLocalWidgets(unsigned long now) {
             frameRgb[off + 2] = b;
         };
         for (const auto& tw : localWidgets) {
-            WidgetRender::draw(specOf(tw), localWidgetsBrightness, frameW, frameH, clk, wx, now, plot);
+            // Full scale when the whole panel is ours: the driver dims it (see
+            // updatePanelBrightness()). Next to a stream the stream sets the driver to full, so the
+            // elements dim their own pixels like the stream does.
+            WidgetRender::draw(specOf(tw), whole ? 255 : localWidgetsBrightness, frameW, frameH, clk, wx, now, plot);
         }
     }
 
@@ -1020,7 +1031,8 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
                 setWidgetRects(nullptr, 0);
                 const uint8_t* p = packet.payload;
                 localEffect.effect     = p[0];
-                localEffect.brightness = p[1];
+                localEffectBrightness  = p[1];
+                localEffect.brightness = (ledType == TYPE_HUB75) ? 255 : p[1];
                 localEffect.speed      = p[2];
                 localEffect.intensity  = p[3];
                 localEffect.palette    = p[4];
@@ -1058,7 +1070,7 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
                     reportedWindow = slaveSink.windowTotal;
                     Serial.printf("Rendering effect %u locally (%ux%u, window %u+%u, bri %u)" "\n",
                                   localEffect.effect, slaveSink.matrixWidth(), slaveSink.matrixHeight(),
-                                  slaveSink.windowOffset, slaveSink.windowTotal, localEffect.brightness);
+                                  slaveSink.windowOffset, slaveSink.windowTotal, localEffectBrightness);
                 }
                 localRenderActive = true;
             }
@@ -1213,6 +1225,38 @@ void handleDownlinkPacket(const HyperBusPacket& packet) {
     busUp.sendPacket(packet.targetId, packet.senderId, packet.command, packet.payload, packet.length);
 }
 
+// Chooses how the HUB75 panel is dimmed. Whatever this Slave draws itself (its elements with the
+// whole panel, or a local effect) goes out at full scale and the driver dims it, which keeps the
+// colours right at low brightness (see BusHub75::setBrightness). A stream from the Master arrives
+// already dimmed, so the driver goes to full for it.
+static void updatePanelBrightness() {
+    if (!strip || ledType != TYPE_HUB75) return;
+    uint8_t want = 255;
+    bool ownDrawing = false;
+    if (localWidgetsActive) {
+        if (!localWidgetsMasterLayer) {
+            want = localWidgetsBrightness;
+            ownDrawing = true;
+        }
+    } else if (localRenderActive) {
+        want = localEffectBrightness;
+        ownDrawing = true;
+    }
+    if (want == panelBrightnessApplied) return;
+
+    if (!ownDrawing && matrixWidth > 0 && matrixHeight > 0) {
+        // Back to a stream: what is on the panel was drawn at full scale for a dimmed driver and
+        // would flash up at full brightness until the stream has repainted it. Blank it first.
+        uint32_t count = (uint32_t)matrixWidth * matrixHeight;
+        for (uint32_t i = 0; i < count; i++) strip->SetPixelColor((uint16_t)i, 0, 0, 0, 0, 0);
+    }
+    strip->setBrightness(want);
+    panelBrightnessApplied = want;
+    // The part of the dimming done in the pixel values changed with it: redraw everything.
+    shownValid = false;
+    forceRender = true;
+}
+
 void setup() {
     // We don't use Serial (USB) so we don't break pins if they overlap, but UART0 and UART1 are safe.
     Serial.begin(115200); // Debug output over USB CDC
@@ -1290,6 +1334,8 @@ void loop() {
         pendingShow = false;
         strip->Show();
     }
+
+    updatePanelBrightness();
 
     if (localRenderActive && strip) {
         if (forceRender) {

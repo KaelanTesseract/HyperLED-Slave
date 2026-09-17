@@ -22,6 +22,8 @@
 #include <NeoPixelBus.h>
 #include <hub75.h>
 #include <esp_heap_caps.h>
+#include <cmath>
+#include <algorithm>
 #include "Config.h"
 
 class IBus {
@@ -31,6 +33,9 @@ public:
     virtual void Show() = 0;
     virtual void SetPixelColor(uint16_t index, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t w2 = 0) = 0;
     virtual const uint8_t* getBuffer() const { return nullptr; }
+    // Dims the whole output. Only a bus that can do better than scaling the pixel values
+    // overrides it (HUB75); everywhere else the colours arrive already dimmed.
+    virtual void setBrightness(uint8_t brightness) { (void)brightness; }
 };
 
 // 1-Wire Digital RGB
@@ -208,6 +213,7 @@ public:
         config.pins.d = HUB75_PIN_D; config.pins.e = HUB75_PIN_E;
         config.pins.clk = HUB75_PIN_CLK; config.pins.lat = HUB75_PIN_LAT; config.pins.oe = HUB75_PIN_OE;
         _driver = new Hub75Driver(config);
+        initPixelTable();
     }
     ~BusHub75() { delete _driver; }
     // begin() can crash (not just return false) when the DMA buffers for the requested
@@ -255,8 +261,95 @@ public:
         if (!_ready) return;
         uint16_t x = index % _width;
         uint16_t y = index / _width;
-        _driver->set_pixel(x, y, r, g, b);
+        const uint8_t* lut = _lut; // one read: the loop may swap tables while a stream is written
+        _driver->set_pixel(x, y, lut[r], lut[g], lut[b]);
     }
+
+    // Brightness for full-scale colours (0-255, same scale and feel as the segment slider).
+    //
+    // Scaling the pixel values does not work on this panel at low brightness. The driver runs
+    // every value through a CIE1931 curve, so 8% on the slider leaves each channel one to three
+    // of its 255 levels: weak channels vanish, strong ones stand alone, and pink turns purple.
+    //
+    // The driver can instead dim by shortening the time each row is lit, which keeps all 255
+    // levels. It cannot go below about 4/63 of full that way, while the slider's perceptual curve
+    // goes much lower (8% is under 1% of the light). So the time does as much as it can, and only
+    // the rest is taken off the pixel values - per channel in light, not in value, so the ratio
+    // between the channels, which is the colour, stays as it was.
+    //
+    // Pass 255 whenever the colours arrive already dimmed (a stream from the Master): that is
+    // full on-time and an identity table.
+    void setBrightness(uint8_t brightness) override {
+        if (!_ready) return;
+        if (brightness == 0) {
+            _driver->set_brightness(0);
+            return;
+        }
+        double target = cieLuminance(brightness / 255.0);           // light the slider asks for
+        int wanted = (int)std::ceil(target * _maxPixels);
+        uint8_t level = 1;                                           // smallest level that lights
+        while (level < 255 && _pixelsAt[level] < wanted) level++;   // at least `wanted` pixels
+        int pixels = _pixelsAt[level] > 0 ? _pixelsAt[level] : 1;
+        double rest = target * _maxPixels / pixels;                 // what the time could not do
+        if (rest > 1.0) rest = 1.0;
+
+        uint8_t* next = (_lut == _lutA) ? _lutB : _lutA;
+        for (int v = 0; v < 256; v++) {
+            double y = cieLuminance(v / 255.0) * rest;
+            long out = lround(cieInverse(y) * 255.0);
+            next[v] = (uint8_t)(out < 0 ? 0 : (out > 255 ? 255 : out));
+        }
+        _lut = next;
+        _driver->set_brightness(level);
+    }
+
+private:
+    uint8_t _lutA[256];
+    uint8_t _lutB[256];
+    uint8_t* _lut = _lutA;
+    // Lit pixels per row slot for each driver brightness level, and their maximum.
+    uint8_t _pixelsAt[256];
+    int _maxPixels = 63;
+
+    static double cieLuminance(double x) {   // the driver's gamma table (HUB75_GAMMA_MODE 1)
+        double L = x * 100.0;
+        return L <= 8.0 ? L / 902.3 : std::pow((L + 16.0) / 116.0, 3.0);
+    }
+    static double cieInverse(double y) {
+        double L = y <= 0.008856 ? y * 902.3 : 116.0 * std::cbrt(y) - 16.0;
+        if (L < 0.0) L = 0.0;
+        if (L > 100.0) L = 100.0;
+        return L / 100.0;
+    }
+
+    // Mirrors esp-hub75 0.3.x: PlatformDma::init_brightness_coeffs(), remap_brightness() and the
+    // display_pixels computation in the DMA backends. Only used to pick a level; if a later driver
+    // version moves the curve, the result is a little off in brightness but still monotonic and
+    // still colour-true.
+    void initPixelTable() {
+        _maxPixels = (int)_width - 1; // default latch_blanking of 1
+        if (_maxPixels < 2) _maxPixels = 2;
+        int minLevel = std::min(255, (4 * 256 + _maxPixels - 1) / _maxPixels);
+        const float y1 = (float)minLevel, y2 = 128.0f, y3 = 255.0f, denom = -4096258.0f;
+        const float a = (255.0f * (y2 - y1) + 128.0f * (y1 - y3) + 1.0f * (y3 - y2)) / denom;
+        const float b = (255.0f * 255.0f * (y1 - y2) + 128.0f * 128.0f * (y3 - y1) + 1.0f * 1.0f * (y2 - y3)) / denom;
+        const float c = (128.0f * 255.0f * (128.0f - 255.0f) * y1 + 255.0f * 1.0f * (255.0f - 1.0f) * y2 +
+                         1.0f * 128.0f * (1.0f - 128.0f) * y3) / denom;
+        const int32_t fa = (int32_t)(a * 65536.0f), fb = (int32_t)(b * 65536.0f), fc = (int32_t)(c * 65536.0f);
+        _pixelsAt[0] = 0;
+        for (int x = 1; x < 256; x++) {
+            int32_t yfp = fa * x * x + fb * x + fc;
+            int effective = (yfp + 32768) >> 16;
+            if (effective < minLevel) effective = minLevel;
+            if (effective > 255) effective = 255;
+            int pixels = (_maxPixels * effective) >> 8;
+            if (pixels > _maxPixels - 1) pixels = _maxPixels - 1;
+            _pixelsAt[x] = (uint8_t)pixels;
+        }
+        for (int v = 0; v < 256; v++) _lutA[v] = (uint8_t)v;
+        _lut = _lutA;
+    }
+public:
 };
 
 // Virtual Bus for Master/Slave (wraps local bus and holds a large memory buffer)
