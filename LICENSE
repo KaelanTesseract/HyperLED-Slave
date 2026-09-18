@@ -193,24 +193,37 @@ All other changes or additions to this Appendix require the production of a new 
 --------------------------------------------------------------------------------
 
 THIRD-PARTY SOFTWARE NOTICES AND INFORMATION
-This project incorporates components from the projects listed below.
-The original copyright notices and the licenses under which these
-components are distributed are respected and acknowledged.
+
+The EUPL-1.2 above applies to HyperLED's own source code. The firmware is built together with the
+components listed below, which remain under their own licences; their copyright notices and
+licence terms are respected and acknowledged. The complete source code of this project is
+published, so the firmware can be rebuilt and relinked against modified versions of the libraries
+licensed under the LGPL.
 
 1. ArduinoJson
-   Copyright (c) 2014-2024 Benoit BLANCHON
+   Copyright (c) 2014-2026 Benoit Blanchon
    License: MIT License (https://opensource.org/licenses/MIT)
+   Source: https://github.com/bblanchon/ArduinoJson
 
 2. NeoPixelBus
-   Copyright (c) 2020 Michael C. Miller (makuna)
+   Copyright (c) Michael C. Miller (Makuna)
    License: GNU Lesser General Public License v3.0 (LGPL-3.0)
+   Source: https://github.com/Makuna/NeoPixelBus
+   Modified at build time by patch_neopixelbus.py (part of this repository),
+   which applies an upstream fix for the ESP32-S3 LCD driving method
+   (https://github.com/Makuna/NeoPixelBus/issues/895).
 
-3. ESP32 Arduino Core
-   Copyright (c) 2015-2024 Espressif Systems
-   License: GNU Lesser General Public License v2.1 (LGPL-2.1)
-
-4. esp-hub75
+3. esp-hub75
    Copyright (c) 2025 Stuart Parmenter
    License: MIT License (https://opensource.org/licenses/MIT)
    Source: https://github.com/esphome-libs/esp-hub75
 
+4. Arduino core for the ESP32 (arduino-esp32)
+   Copyright (c) Espressif Systems
+   License: GNU Lesser General Public License v2.1 or later (LGPL-2.1-or-later)
+   Source: https://github.com/espressif/arduino-esp32
+
+5. ESP-IDF (linked as the precompiled libraries of the Arduino core)
+   Copyright (c) Espressif Systems (Shanghai) Co., Ltd.
+   License: Apache License 2.0 (https://www.apache.org/licenses/LICENSE-2.0)
+   Source: https://github.com/espressif/esp-idf
