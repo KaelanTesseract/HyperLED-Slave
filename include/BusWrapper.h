@@ -156,7 +156,7 @@ public:
     void Show() override {}
     
     void SetPixelColor(uint16_t index, uint8_t r, uint8_t g, uint8_t b, uint8_t w, uint8_t w2) override {
-        // In WLED, analog strips mirror the first pixel to the whole strip usually
+        // An analog strip is a single light: the first pixel drives the whole strip.
         if (index == 0) {
             if(_numPins == 1) { // White
                 uint8_t bri = w > 0 ? w : max(r, max(g,b));

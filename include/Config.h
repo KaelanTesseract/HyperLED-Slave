@@ -22,8 +22,8 @@
 
 #define HYPERLED_VERSION "0.2.007"
 
-// --- Preferences Namespaces & Keys ---
-#define PREF_NAMESPACE "wled_clone"
+// --- Preferences Keys ---
+// (This Slave keeps its settings in the "hyperled_slave" namespace - see main.cpp.)
 
 // ABL
 #define PREF_ABL_ENABLE "abl_en"
