@@ -27,6 +27,7 @@
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include "HyperBus.h"
+#include "UpdateSeal.h"
 #include "EspNowBus.h"
 #include "StatusLedManager.h"
 #include "EffectEngine.h"
@@ -72,6 +73,24 @@ bool pendingOta = false;
 String otaSsid = "";
 String otaPass = "";
 String otaUrl = "";
+
+// The sealed update (see UpdateSeal.h). Over ESP-NOW handleUplinkPacket() runs in the WiFi task,
+// where neither the key generation nor sending is allowed, so it only copies what arrived and
+// loop() does the work - the same pattern as the wireless PONG below.
+static volatile bool pendingKeyOffer = false;
+static bool keyOfferWireless = false;
+static uint8_t keyOfferMasterPub[UpdateSeal::PUBLIC_LEN];
+static volatile bool pendingSealedUpdate = false;
+static uint8_t sealedUpdateBuf[250];
+static uint16_t sealedUpdateLen = 0;
+// The key agreed for the current update, and the keys it came from: a repeated offer with the
+// same Master key (its answer got lost) is answered with the same public key, so the Master does
+// not mistake the second answer for a stranger's.
+static bool sealKeyReady = false;
+static unsigned long sealKeyAt = 0;
+static uint8_t sealKey[UpdateSeal::KEY_LEN];
+static uint8_t sealMasterPub[UpdateSeal::PUBLIC_LEN];
+static uint8_t sealOwnPub[UpdateSeal::PUBLIC_LEN];
 
 void initLEDs() {
     if (strip) {
@@ -1341,8 +1360,28 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
                   pendingShow = true;
               }
           }
+        else if (packet.command == CMD_UPDATE_KEY) {
+            if (packet.targetId == myId && packet.senderId == HYPERBUS_MASTER_ID &&
+                packet.length == UpdateSeal::PUBLIC_LEN && !pendingKeyOffer) {
+                memcpy(keyOfferMasterPub, packet.payload, UpdateSeal::PUBLIC_LEN);
+                keyOfferWireless = packet.isWireless;
+                pendingKeyOffer = true;
+            }
+        }
+        else if (packet.command == CMD_TRIGGER_UPDATE_SEALED) {
+            if (packet.targetId == myId && packet.senderId == HYPERBUS_MASTER_ID &&
+                packet.length <= sizeof(sealedUpdateBuf) && !pendingSealedUpdate) {
+                memcpy(sealedUpdateBuf, packet.payload, packet.length);
+                sealedUpdateLen = packet.length;
+                pendingSealedUpdate = true;
+            }
+        }
+        else if (packet.command == CMD_TRIGGER_UPDATE && packet.isWireless) {
+            // Plain credentials over the air are exactly what CMD_TRIGGER_UPDATE_SEALED replaced.
+            Serial.println("Ignoring an unsealed update over ESP-NOW");
+        }
         else if (packet.command == CMD_TRIGGER_UPDATE) {
-            // Payload: JSON string with {"ssid":"...","pass":"...","url":"..."}
+            // Payload: JSON string with {"ssid":"...","pass":"...","url":"..."} - over the cable only.
             char jsonBuf[512] = {0};
             int copyLen = min((int)packet.length, 511);
             memcpy(jsonBuf, packet.payload, copyLen);
@@ -1455,7 +1494,83 @@ void setup() {
     Serial.println("Slave Ready.");
 }
 
+// Answers the Master's key offer with our own fresh public key (see UpdateSeal.h).
+static void processKeyOffer() {
+    uint8_t masterPub[UpdateSeal::PUBLIC_LEN];
+    memcpy(masterPub, keyOfferMasterPub, sizeof(masterPub));
+    bool wireless = keyOfferWireless;
+    pendingKeyOffer = false;
+
+    bool repeat = sealKeyReady && millis() - sealKeyAt < UpdateSeal::EXCHANGE_TIMEOUT_MS &&
+                  memcmp(masterPub, sealMasterPub, sizeof(masterPub)) == 0;
+    if (!repeat) {
+        UpdateSeal::KeyPair kp;
+        if (!UpdateSeal::generate(kp)) {
+            Serial.println("SealedUpdate: could not create a key pair");
+            return;
+        }
+        bool ok = UpdateSeal::deriveKey(kp, masterPub, masterPub, kp.pub, sealKey);
+        memcpy(sealOwnPub, kp.pub, sizeof(sealOwnPub));
+        UpdateSeal::wipe(&kp, sizeof(kp));
+        if (!ok) {
+            Serial.println("SealedUpdate: key agreement failed");
+            sealKeyReady = false;
+            return;
+        }
+        memcpy(sealMasterPub, masterPub, sizeof(sealMasterPub));
+        sealKeyReady = true;
+        sealKeyAt = millis();
+    }
+    if (wireless) espBus.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_UPDATE_KEY, sealOwnPub, sizeof(sealOwnPub));
+    else busUp.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_UPDATE_KEY, sealOwnPub, sizeof(sealOwnPub));
+}
+
+// Opens the sealed credentials and starts the update exactly as the plain command did.
+static void processSealedUpdate() {
+    uint8_t buf[sizeof(sealedUpdateBuf)];
+    uint16_t len = sealedUpdateLen;
+    memcpy(buf, sealedUpdateBuf, len);
+    pendingSealedUpdate = false;
+
+    if (!sealKeyReady || millis() - sealKeyAt >= UpdateSeal::EXCHANGE_TIMEOUT_MS) {
+        // Also the Master's repeat of an update that is already under way.
+        return;
+    }
+    if (len < 2 || buf[0] != UPDATE_SEAL_FORMAT) return;
+    uint8_t urlLen = buf[1];
+    size_t aadLen = 2 + urlLen;
+    if (urlLen > UPDATE_SEAL_MAX_URL || len < aadLen + UpdateSeal::OVERHEAD + 2) return;
+
+    size_t sealedLen = len - aadLen;
+    uint8_t plain[sizeof(sealedUpdateBuf)];
+    size_t plainLen = sealedLen - UpdateSeal::OVERHEAD;
+    bool ok = UpdateSeal::open(sealKey, buf, aadLen, buf + aadLen, sealedLen, plain);
+    UpdateSeal::wipe(sealKey, sizeof(sealKey));
+    sealKeyReady = false;
+    if (!ok) {
+        Serial.println("SealedUpdate: rejected - does not match the agreed key");
+        return;
+    }
+
+    uint8_t ssidLen = plain[0];
+    bool valid = ssidLen > 0 && ssidLen <= 32 && 1u + ssidLen < plainLen;
+    uint8_t passLen = valid ? plain[1 + ssidLen] : 0;
+    valid = valid && passLen <= 64 && 2u + ssidLen + passLen == plainLen && urlLen > 0;
+    if (valid) {
+        otaSsid = String((const char*)plain + 1, ssidLen);
+        otaPass = String((const char*)plain + 2 + ssidLen, passLen);
+        otaUrl = String((const char*)buf + 2, urlLen);
+        pendingOta = true;
+        Serial.println("SealedUpdate: credentials received, starting the update");
+    }
+    UpdateSeal::wipe(plain, sizeof(plain));
+    UpdateSeal::wipe(buf, sizeof(buf));
+}
+
 void loop() {
+    if (pendingKeyOffer) processKeyOffer();
+    if (pendingSealedUpdate) processSealedUpdate();
+
     if (pendingOta) {
         pendingOta = false;
         performOtaUpdate();

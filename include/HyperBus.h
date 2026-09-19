@@ -40,6 +40,8 @@ enum HyperBusCommand {
     CMD_PONG = 0x02,
     CMD_SET_CONFIG = 0x03,
     CMD_SET_LEDS = 0x04,
+    // Online update with the Wi-Fi credentials as plain JSON. Only for Slaves older than 0.2.008,
+    // and only over the cable - newer ones ignore it over the air (see CMD_TRIGGER_UPDATE_SEALED).
     CMD_TRIGGER_UPDATE = 0x05,
     CMD_SET_LEDS_CHUNK = 0x06,
     // Onboard status LED of a Slave. Payload: [on][r][g][b][brightness].
@@ -117,7 +119,15 @@ enum HyperBusCommand {
     // own (255 = as bright as the segment), flags bit0: second colour enabled. Only drawn while the Slave owns the
     // whole panel (no MASTER_LAYER) - a moving background cannot be streamed. Sent next to
     // CMD_SET_WIDGETS, on change plus the same periodic refresh.
-    CMD_SET_BACKGROUND = 0x0E
+    CMD_SET_BACKGROUND = 0x0E,
+    // Key exchange before an online update (Slaves 0.2.008 and later, see UpdateSeal.h). The
+    // Master sends its fresh X25519 public key to one Slave; that Slave answers with its own under
+    // the same command. Payload: [public key, 32 bytes].
+    CMD_UPDATE_KEY = 0x0F,
+    // The online update itself, with the Wi-Fi credentials sealed under the key agreed above.
+    // Payload: see UpdateSeal.h. Replaces CMD_TRIGGER_UPDATE, whose plain credentials a Slave now
+    // only accepts over the cable.
+    CMD_TRIGGER_UPDATE_SEALED = 0x10
 };
 
 // Bytes per pixel in a CMD_SET_LEDS payload (r, g, b, w, w2). CMD_SET_LEDS_CHUNK carries a

@@ -7,7 +7,7 @@ Firmware für Slave-Boards im Master/Slave-Verbund des [HyperLED](https://github
 - **Automatische Verbindungserkennung:** Ein Slave erkennt selbstständig, ob er kabelgebunden (UART) oder kabellos (ESP-NOW) mit dem Master verbunden ist, und rastet dauerhaft in diesem Modus ein. Bricht die Verbindung länger aus, wird automatisch wieder in den Erkennungsmodus zurückgewechselt.
 - **Daisy-Chaining:** Kabelgebundene Slaves können weitere Slaves an ihrem eigenen Downlink-Port weiterreichen, sodass sich mehrere Boards in Reihe verketten lassen.
 - **Fernkonfiguration:** LED-Typ, Pinbelegung, LED-Anzahl bzw. Matrixgröße und Name werden vollständig über die Web-Oberfläche des Masters eingestellt – am Slave selbst ist nichts einzurichten.
-- **Over-the-Air-Updates:** Der Master kann ein Firmware-Update aus der Ferne anstoßen; der Slave verbindet sich dafür kurzzeitig eigenständig mit dem WLAN.
+- **Over-the-Air-Updates:** Der Master kann ein Firmware-Update aus der Ferne anstoßen; der Slave verbindet sich dafür kurzzeitig eigenständig mit dem WLAN. Die WLAN-Zugangsdaten bekommt er dabei verschlüsselt (ab 0.2.008); unverschlüsselte Zugangsdaten nimmt er nur noch über das Kabel an.
 
 ## Unterstützte LED-Typen
 
