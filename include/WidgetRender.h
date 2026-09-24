@@ -88,6 +88,17 @@ struct Weather {
     uint8_t icon;          // WEATHER_ICON_* index
 };
 
+// The weather element's `format` carries what it shows and how, so nothing had to be added to
+// the element or to the protocol: the lowest two bits are the content the element always had,
+// the two above them the size of the icon and its colouring.
+#define WEATHER_FMT_CONTENT   0x03  // 0 = icon + temperature, 1 = icon only, 2 = temperature only
+#define WEATHER_FMT_LARGE     0x04  // the 16x16 icons instead of the 11x11 ones
+#define WEATHER_FMT_OWN_COLOR 0x08  // the element's colour instead of the icon's own colours
+
+inline uint8_t weatherIconSide(uint8_t format) {
+    return (format & WEATHER_FMT_LARGE) ? WEATHER_ICON_LARGE : WEATHER_ICON_SMALL;
+}
+
 struct Rect {
     int16_t x;
     int16_t y;
@@ -236,12 +247,14 @@ inline Rect bounds(const Spec& s) {
         }
         case TYPE_WEATHER: {
             int16_t w = 0, h = 0;
-            if (s.format != 2) {
-                w += (int16_t)(WEATHER_ICON_WIDTH * scale);
-                h = (int16_t)(WEATHER_ICON_HEIGHT * scale);
+            uint8_t content = s.format & WEATHER_FMT_CONTENT;
+            int16_t side = (int16_t)weatherIconSide(s.format);
+            if (content != 2) {
+                w += side * scale;
+                h = side * scale;
             }
-            if (s.format != 1) {
-                if (s.format != 2) w += (int16_t)scale; // the gap after the icon
+            if (content != 1) {
+                if (content != 2) w += (int16_t)scale; // the gap after the icon
                 w += textWidth(WEATHER_TEXT_MAX, g, scale);
                 int16_t th = (int16_t)(g.h * scale);
                 if (th > h) h = th;
@@ -313,25 +326,44 @@ inline void draw(const Spec& s, uint8_t bri, uint16_t cw, uint16_t ch, const Clo
     if (s.type == TYPE_WEATHER) {
         // tw.format: 0 = icon + temperature, 1 = icon only, 2 = temperature only.
         int16_t curX = s.x;
-        if (s.format != 2) {
+        uint8_t content = s.format & WEATHER_FMT_CONTENT;
+        bool large = (s.format & WEATHER_FMT_LARGE) != 0;
+        bool ownColor = (s.format & WEATHER_FMT_OWN_COLOR) != 0;
+        uint8_t side = weatherIconSide(s.format);
+        if (content != 2) {
             uint8_t icon = wx.icon;
-            for (uint8_t col = 0; col < WEATHER_ICON_WIDTH; col++) {
-                for (uint8_t row = 0; row < WEATHER_ICON_HEIGHT; row++) {
-                    if (!weather_icon_pixel(icon, col, row)) continue;
+            for (uint8_t col = 0; col < side; col++) {
+                for (uint8_t row = 0; row < side; row++) {
+                    uint8_t ir, ig, ib;
+                    if (!weather_icon_pixel(icon, col, row, large, ir, ig, ib)) continue;
+                    uint8_t pr, pg, pb;
+                    if (ownColor) {
+                        // The element's colour, shaded by how bright the drawing's own colour is -
+                        // so outline, body and highlight stay apart and the picture keeps its depth.
+                        uint16_t lum = ((uint16_t)ir * 77 + (uint16_t)ig * 150 + (uint16_t)ib * 29) >> 8;
+                        if (lum < 40) lum = 40;
+                        pr = (uint8_t)((uint16_t)r * lum / 255);
+                        pg = (uint8_t)((uint16_t)g * lum / 255);
+                        pb = (uint8_t)((uint16_t)b * lum / 255);
+                    } else {
+                        pr = (uint8_t)((uint16_t)ir * bri / 255);
+                        pg = (uint8_t)((uint16_t)ig * bri / 255);
+                        pb = (uint8_t)((uint16_t)ib * bri / 255);
+                    }
                     for (uint8_t sy = 0; sy < scale; sy++) {
                         int16_t py = s.y + (int16_t)row * scale + sy;
                         if (py < 0 || py >= (int16_t)ch) continue;
                         for (uint8_t sx = 0; sx < scale; sx++) {
                             int16_t px = curX + (int16_t)col * scale + sx;
                             if (px < 0 || px >= (int16_t)cw) continue;
-                            plot(px, py, r, g, b);
+                            plot(px, py, pr, pg, pb);
                         }
                     }
                 }
             }
-            curX += (int16_t)((WEATHER_ICON_WIDTH + 1) * scale);
+            curX += (int16_t)((side + 1) * scale);
         }
-        if (s.format != 1) {
+        if (content != 1) {
             char wbuf[8];
             if (wx.valid) {
                 snprintf(wbuf, sizeof(wbuf), "%d`C", (int)wx.temp);
@@ -339,7 +371,15 @@ inline void draw(const Spec& s, uint8_t bri, uint16_t cw, uint16_t ch, const Clo
                 snprintf(wbuf, sizeof(wbuf), "--`C");
             }
             Glyphs gl = glyphs(s.font);
-            drawTextRun(wbuf, (uint16_t)strlen(wbuf), curX, s.y, gl, scale, cw, ch, r, g, b, plot);
+            // The temperature sits in the middle of the icon's height, not at its top edge -
+            // an icon is taller than the digits, and flush at the top it looked misplaced.
+            int16_t textY = s.y;
+            if (content == 0) {
+                int16_t iconH = (int16_t)side * scale;
+                int16_t textH = (int16_t)gl.h * scale;
+                if (iconH > textH) textY += (iconH - textH) / 2;
+            }
+            drawTextRun(wbuf, (uint16_t)strlen(wbuf), curX, textY, gl, scale, cw, ch, r, g, b, plot);
         }
         return;
     }
