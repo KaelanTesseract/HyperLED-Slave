@@ -127,7 +127,33 @@ enum HyperBusCommand {
     // The online update itself, with the Wi-Fi credentials sealed under the key agreed above.
     // Payload: see UpdateSeal.h. Replaces CMD_TRIGGER_UPDATE, whose plain credentials a Slave now
     // only accepts over the cable.
-    CMD_TRIGGER_UPDATE_SEALED = 0x10
+    CMD_TRIGGER_UPDATE_SEALED = 0x10,
+    // A Lua script a Slave runs itself (Slaves 0.3.000 and later; older ones ignore all of these).
+    // The Master states what should run, the Slave fetches what it does not have, and answers with
+    // its state - the same pattern as the image elements, for the same reason: nothing here is a
+    // pixel stream.
+    //
+    // CMD_SET_SCRIPT, Master -> Slave, on change plus a refresh every 2 s. Payload
+    // (HYPERBUS_SCRIPT_CONFIG_LEN): [flags] [brightness] [level] [length L][length H] [crc 4 bytes].
+    // flags bit0: on, bit1: release (stop the script; the Master drives the Slave again). `level` is
+    // the script support the script needs (PLUGIN_SCRIPT_LEVEL), `crc` the CRC-32 of the script
+    // text, `length` its size in bytes (at most 8192). A Slave that hears nothing for 10 s stops
+    // the script by itself.
+    CMD_SET_SCRIPT = 0x11,
+    // Slave -> Master: "send me the script with this crc". Payload (HYPERBUS_SCRIPT_REQUEST_LEN):
+    // [crc 4 bytes]. Asked again every second while the script is incomplete.
+    CMD_REQUEST_SCRIPT = 0x12,
+    // Master -> Slave, only after a request. Payload: [crc 4 bytes] [offset L][offset H]
+    // [total L][total H] [script bytes...] - at most HYPERBUS_SCRIPT_CHUNK_DATA bytes per piece,
+    // one piece every 20 ms. The Slave checks the CRC-32 of the whole text before it runs it.
+    CMD_SCRIPT_CHUNK = 0x13,
+    // Master -> Slave: the settings and values the script reads (tables `settings` and `v`).
+    // Payload: [sequence] [count] then per item [kind | 0x80 for a setting] [nameLen] [name...]
+    // and its data (see Script::Wire in ScriptWire.h). On change, plus the 2 s refresh.
+    CMD_SET_SCRIPT_VALUES = 0x14,
+    // Slave -> Master: what the script is doing, on change and every 5 s. Payload: see
+    // Script::Wire::Status in ScriptWire.h.
+    CMD_SCRIPT_STATUS = 0x15
 };
 
 // Bytes per pixel in a CMD_SET_LEDS payload (r, g, b, w, w2). CMD_SET_LEDS_CHUNK carries a
@@ -180,6 +206,15 @@ enum HyperBusCommand {
 #define HYPERBUS_IMAGE_CHUNK_HEADER 11
 #define HYPERBUS_IMAGE_CHUNK_DATA 229
 #define HYPERBUS_IMAGE_REQUEST_LEN 5
+
+// Script transfer (see CMD_SET_SCRIPT and the following commands).
+#define HYPERBUS_SCRIPT_CONFIG_LEN 9
+#define HYPERBUS_SCRIPT_REQUEST_LEN 4
+#define HYPERBUS_SCRIPT_CHUNK_HEADER 8
+#define HYPERBUS_SCRIPT_CHUNK_DATA 224
+#define HYPERBUS_SCRIPT_MAX_BYTES 8192
+#define HYPERBUS_SCRIPT_VALUES_MAX 240
+#define HYPERBUS_SCRIPT_STATUS_MAX 80
 
 // Which effects a Slave can render on its own is decided by EffectEngine::canRender() alone.
 // This header deliberately does not carry a second copy of that list: it did, and adding effects

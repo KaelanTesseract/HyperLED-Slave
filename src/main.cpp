@@ -32,6 +32,7 @@
 #include "StatusLedManager.h"
 #include "EffectEngine.h"
 #include "WidgetRender.h"
+#include "ScriptRunner.h"
 #include <esp_rom_crc.h>
 #include <esp_heap_caps.h>
 
@@ -170,6 +171,9 @@ void initLEDs() {
             strip->Show();
         }
     }
+
+    // Scripts draw into a buffer of the output's size.
+    ScriptRunner.setGeometry(ledType == TYPE_HUB75 ? matrixWidth : ledCount, ledType == TYPE_HUB75 ? matrixHeight : 1);
 }
 
 void loadConfig() {
@@ -473,6 +477,8 @@ static const unsigned long IMAGE_REQUEST_RETRY_MS = 3000;
 static const uint16_t IMAGE_MAX_BYTES = 64 * 64 * 3; // the Master's TEXT_WIDGET_IMG_MAX
 // Which transport the widget config came over - the requests go back the same way.
 static volatile bool widgetsOverEspNow = true;
+// Where the last script command came from, so requests and status go back the same way.
+static volatile bool scriptWireOverEspNow = true;
 
 static void releaseImage(SlaveImage& img) {
     if (img.data) free(img.data);
@@ -1183,6 +1189,7 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
             }
         }
         else if (packet.command == CMD_SET_SEGMENT) {
+            if (ScriptRunner.active()) return;  // a script owns the output
             if (packet.length >= HYPERBUS_SEGMENT_PAYLOAD_LEN) {
                 // The Master switched this segment back to a normal effect, which draws the whole
                 // panel. The widget list itself belongs to loop() and is simply replaced next time.
@@ -1236,6 +1243,7 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
             }
         }
         else if (packet.command == CMD_SET_WIDGETS) {
+            if (ScriptRunner.active()) return;  // a script owns the output
             // Only hand the payload over - applying it touches the widget list and the panel, both
             // of which belong to loop() (see applyWidgetConfig).
             if (packet.length >= HYPERBUS_WIDGET_HEADER_LEN &&
@@ -1310,6 +1318,7 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
             }
         }
         else if (packet.command == CMD_SET_LEDS) {
+              if (ScriptRunner.active()) return;  // a script owns the output
               // Payload: RGBW array (5 bytes per pixel)
               // Widgets stay on: in widget mode the Master streams the rest of the panel alongside
               // them, and their rectangles are kept out of the stream below.
@@ -1332,6 +1341,7 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
               }
           }
         else if (packet.command == CMD_SET_LEDS_CHUNK) {
+              if (ScriptRunner.active()) return;  // a script owns the output
               // Payload: [OffsetL] [OffsetH] [RGBW array]
               localRenderActive = false;  // the Master is driving the pixels again
               if (!localWidgetsMasterLayer) shownValid = false;
@@ -1360,6 +1370,19 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
                   pendingShow = true;
               }
           }
+        else if (packet.command == CMD_SET_SCRIPT) {
+            ScriptRunner.onConfig(packet.payload, packet.length);
+            scriptWireOverEspNow = packet.isWireless;
+            // The script owns the output now: nothing else may draw next to it.
+            localRenderActive = false;
+            localWidgetsActive = false;
+        }
+        else if (packet.command == CMD_SCRIPT_CHUNK) {
+            ScriptRunner.onChunk(packet.payload, packet.length);
+        }
+        else if (packet.command == CMD_SET_SCRIPT_VALUES) {
+            ScriptRunner.onValues(packet.payload, packet.length);
+        }
         else if (packet.command == CMD_UPDATE_KEY) {
             if (packet.targetId == myId && packet.senderId == HYPERBUS_MASTER_ID &&
                 packet.length == UpdateSeal::PUBLIC_LEN && !pendingKeyOffer) {
@@ -1427,6 +1450,9 @@ static void updatePanelBrightness() {
             want = localWidgetsBrightness;
             ownDrawing = true;
         }
+    } else if (ScriptRunner.active()) {
+        want = ScriptRunner.brightness();
+        ownDrawing = true;
     } else if (localRenderActive) {
         want = localEffectBrightness;
         ownDrawing = true;
@@ -1450,6 +1476,7 @@ void setup() {
     // We don't use Serial (USB) so we don't break pins if they overlap, but UART0 and UART1 are safe.
     Serial.begin(115200); // Debug output over USB CDC
     Serial.println("HyperLED Slave Booting...");
+    ScriptRunner.begin();  // before loadConfig(): initLEDs() tells it the geometry
     
     loadConfig();
     
@@ -1601,6 +1628,59 @@ void loop() {
     }
 
     updatePanelBrightness();
+
+    // A script's finished frame goes to the panel; what the script needs from the Master goes out.
+    ScriptRunner.service();
+    if (strip) {
+        static uint8_t* scriptFrame = nullptr;
+        static size_t scriptFrameBytes = 0;
+        size_t need = (size_t)(ledType == TYPE_HUB75 ? matrixWidth * matrixHeight : ledCount) * 3;
+        if (!scriptFrame || scriptFrameBytes != need) {
+            heap_caps_free(scriptFrame);
+            scriptFrame = (uint8_t*)heap_caps_malloc(need, MALLOC_CAP_SPIRAM);
+            if (!scriptFrame) scriptFrame = (uint8_t*)heap_caps_malloc(need, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            scriptFrameBytes = scriptFrame ? need : 0;
+        }
+        uint16_t sw = 0, sh = 0;
+        if (scriptFrame && ScriptRunner.takeFrame(scriptFrame, scriptFrameBytes, sw, sh)) {
+            // A HUB75 driver is dimmed by the driver itself (see updatePanelBrightness); a strip is
+            // dimmed in the pixel values.
+            uint8_t scale = (ledType == TYPE_HUB75) ? 255 : ScriptRunner.brightness();
+            size_t count = (size_t)sw * sh;
+            for (size_t i = 0; i < count; i++) {
+                strip->SetPixelColor((uint16_t)i, (scriptFrame[i * 3] * scale) / 255, (scriptFrame[i * 3 + 1] * scale) / 255,
+                                     (scriptFrame[i * 3 + 2] * scale) / 255, 0, 0);
+            }
+            strip->Show();
+        }
+        uint32_t wantedCrc = 0;
+        if (ScriptRunner.wantRequest(wantedCrc)) {
+            uint8_t request[HYPERBUS_SCRIPT_REQUEST_LEN];
+            Script::Wire::encodeRequest(wantedCrc, request);
+            if (scriptWireOverEspNow) espBus.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_REQUEST_SCRIPT, request, sizeof(request));
+            else busUp.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_REQUEST_SCRIPT, request, sizeof(request));
+        }
+        Script::Wire::Status status;
+        if (ScriptRunner.wantStatus(status)) {
+            uint8_t out[HYPERBUS_SCRIPT_STATUS_MAX];
+            size_t length = Script::Wire::encodeStatus(status, out);
+            if (scriptWireOverEspNow) espBus.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_SCRIPT_STATUS, out, length);
+            else busUp.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_SCRIPT_STATUS, out, length);
+        }
+    }
+
+    // A script that has ended (the Master stopped sending, or released it) leaves its last frame on
+    // the panel; if nothing else takes over, blank it.
+    {
+        static bool scriptWasActive = false;
+        bool scriptActive = ScriptRunner.active();
+        if (scriptWasActive && !scriptActive && strip && !localRenderActive && !localWidgetsActive) {
+            uint32_t count = (ledType == TYPE_HUB75) ? (uint32_t)matrixWidth * matrixHeight : ledCount;
+            for (uint32_t i = 0; i < count; i++) strip->SetPixelColor((uint16_t)i, 0, 0, 0, 0, 0);
+            strip->Show();
+        }
+        scriptWasActive = scriptActive;
+    }
 
     if (localRenderActive && strip) {
         if (forceRender) {
