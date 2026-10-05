@@ -20,7 +20,7 @@
 
 #include <Arduino.h>
 
-#define HYPERLED_VERSION "0.3.001"
+#define HYPERLED_VERSION "0.3.002"
 
 // --- Preferences Keys ---
 // (This Slave keeps its settings in the "hyperled_slave" namespace - see main.cpp.)
