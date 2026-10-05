@@ -246,7 +246,10 @@ void performOtaUpdate() {
         Serial.print(".");
         retries++;
     }
-    
+
+    // {chip} in the address is this Slave's own chip: the Master leaves it to a Slave from 0.3.005 on.
+    otaUrl.replace("{chip}", HYPERLED_CHIP);
+
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("\nWiFi connected! Downloading firmware...");
         WiFiClientSecure client;
@@ -267,7 +270,43 @@ void performOtaUpdate() {
             }
         }
         http.end();
-        
+
+        // Is the image built for this chip? The first 16 bytes say so; asked for before anything is
+        // written, because a Slave out of reach of a cable must not take a firmware it cannot boot.
+        int imageChip = -1;
+        {
+            WiFiClientSecure probeClient;
+            probeClient.setInsecure();
+            HTTPClient probe;
+            probe.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+            probe.setTimeout(10000);
+            if (probe.begin(probeClient, finalUrl)) {
+                probe.addHeader("Range", "bytes=0-15");
+                int code = probe.GET();
+                if (code == HTTP_CODE_OK || code == HTTP_CODE_PARTIAL_CONTENT) {
+                    WiFiClient* stream = probe.getStreamPtr();
+                    uint8_t head[16];
+                    size_t got = 0;
+                    unsigned long started = millis();
+                    while (got < sizeof(head) && millis() - started < 8000 && (probe.connected() || stream->available())) {
+                        if (stream->available()) head[got++] = (uint8_t)stream->read();
+                        else delay(5);
+                    }
+                    if (got == sizeof(head)) imageChip = firmwareImageIsForThisChip(head, got) ? 1 : 0;
+                }
+            }
+            probe.end();
+        }
+        if (imageChip != 1) {
+            Serial.println(imageChip == 0 ? "OTA: this firmware is built for another chip, not installed"
+                                          : "OTA: could not check the firmware, not installed");
+            WiFi.disconnect(true);
+            WiFi.mode(WIFI_OFF);
+            Serial.println("OTA Failed. Rebooting in 2s...");
+            delay(2000);
+            ESP.restart();
+        }
+
         httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
         t_httpUpdate_return ret = httpUpdate.update(client, finalUrl);
         

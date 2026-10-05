@@ -20,7 +20,10 @@
 
 #include <Arduino.h>
 
-#define HYPERLED_VERSION "0.3.002"
+#define HYPERLED_VERSION "0.3.005"
+
+// The chip this firmware is built for (HYPERLED_CHIP, HYPERLED_CHIP_ID) lives in ChipId.h.
+#include "ChipId.h"
 
 // --- Preferences Keys ---
 // (This Slave keeps its settings in the "hyperled_slave" namespace - see main.cpp.)
