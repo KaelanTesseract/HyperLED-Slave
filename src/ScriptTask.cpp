@@ -236,9 +236,21 @@ void Task::load(const std::vector<uint8_t>& text) {
     if (_haveValues) applyValues();
 }
 
+// The last message of the script (a log() call, or the text of an error) is part of its status, so
+// that Live values shows it. Called from the script's own task, which is the only one that touches
+// the host.
+void Task::publishMessage() {
+    xSemaphoreTakeRecursive(_lock, portMAX_DELAY);
+    if (_status.message != _host.message()) _status.message = _host.message();
+    xSemaphoreGiveRecursive(_lock);
+}
+
 void Task::applyValues() {
     Result r = _host.setValues(_settings, _values);
-    if (r == Result::Ok) return;
+    if (r == Result::Ok) {
+        publishMessage();  // a log() call in update() shows up too
+        return;
+    }
     xSemaphoreTakeRecursive(_lock, portMAX_DELAY);
     _status.message = _host.message();
     _status.result = (uint8_t)r;
@@ -262,6 +274,7 @@ void Task::runFrame() {
         _status.frameCrc = _canvas->crc();
         _status.fps = (uint8_t)_host.fps();
         _status.memoryKb = (uint8_t)(_host.memoryUsed() / 1024);
+        if (_status.message != _host.message()) _status.message = _host.message();  // what log() wrote
         _status.frameUs10 = (uint16_t)min<unsigned long>(65535, _frameTimeSum / _frameCount / 100);
         _frameReady = true;
         _active = true;

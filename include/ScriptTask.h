@@ -75,6 +75,7 @@ private:
     static void entry(void* self);
     void loop();
     void closeHost(Wire::State state, uint8_t result, const String& message);
+    void publishMessage();
     void load(const std::vector<uint8_t>& text);
     void applyValues();
     void runFrame();
