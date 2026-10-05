@@ -39,6 +39,7 @@ public:
     void onConfig(const uint8_t* payload, size_t length);
     void onChunk(const uint8_t* payload, size_t length);
     void onValues(const uint8_t* payload, size_t length);
+    void onData(const uint8_t* payload, size_t length);
 
     // From loop(): carries out what arrived (starts and ends the task, hands over the script and its
     // values, ends a script the Master has stopped talking about).
@@ -71,6 +72,12 @@ private:
     bool _textHanded = false;    // the complete, intact text is with the task
     std::vector<uint8_t> _values;  // the latest CMD_SET_SCRIPT_VALUES payload
     bool _valuesNew = false;
+    // CMD_SET_SCRIPT_DATA packets as they came in (the receive path only copies them): a ring, a
+    // packet that finds it full pushes out the oldest, the Master repeats everything anyway.
+    static const uint8_t DATA_RING = 16;
+    uint8_t _dataRing[DATA_RING][Script::Wire::VALUES_MAX];
+    uint16_t _dataRingLen[DATA_RING];
+    uint8_t _dataHead = 0, _dataCount = 0;
     bool _releaseRequested = false;
     bool _statusDirty = true;
     volatile uint8_t _brightness = 255;
@@ -78,6 +85,19 @@ private:
 
     // loop() only.
     uint8_t _valuesSequenceApplied = 0xFF;
+    // The parts of the list of each kind (settings, values) that are being collected, and the lists
+    // the script has now.
+    struct DataAssembly {
+        uint8_t sequence = 0xFF;
+        uint8_t parts = 0;
+        uint16_t have = 0;  // bit per part
+        std::vector<Script::Item> part[Script::Wire::DATA_PARTS];
+    };
+    DataAssembly _assembly[2];
+    uint8_t _dataApplied[2] = {0xFF, 0xFF};
+    std::vector<Script::Item> _kept[2];
+    void resetData();
+    bool takeData();
     bool _startFailed = false;
     unsigned long _startFailedAt = 0;
     unsigned long _lastStatusAt = 0;

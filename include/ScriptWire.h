@@ -37,6 +37,8 @@ constexpr size_t CHUNK_HEADER = HYPERBUS_SCRIPT_CHUNK_HEADER;
 constexpr size_t CHUNK_DATA = HYPERBUS_SCRIPT_CHUNK_DATA;
 constexpr size_t MAX_SCRIPT_BYTES = HYPERBUS_SCRIPT_MAX_BYTES;
 constexpr size_t VALUES_MAX = HYPERBUS_SCRIPT_VALUES_MAX;
+constexpr size_t DATA_HEADER = HYPERBUS_SCRIPT_DATA_HEADER;
+constexpr size_t DATA_PARTS = HYPERBUS_SCRIPT_DATA_PARTS;
 constexpr size_t STATUS_MAX = HYPERBUS_SCRIPT_STATUS_MAX;
 constexpr size_t MESSAGE_MAX = 60;
 
@@ -183,13 +185,8 @@ inline size_t encodeItems(uint8_t sequence, const std::vector<Item>& settings, c
     return o;
 }
 
-inline bool decodeItems(const uint8_t* p, size_t n, uint8_t& sequence, std::vector<Item>& settings, std::vector<Item>& values) {
-    settings.clear();
-    values.clear();
-    if (!p || n < 2) return false;
-    sequence = p[0];
-    uint8_t count = p[1];
-    size_t o = 2;
+// `count` items from offset `o` on, each into settings or values by its kind byte.
+inline bool parseItems(const uint8_t* p, size_t n, size_t o, uint8_t count, std::vector<Item>& settings, std::vector<Item>& values) {
     for (uint8_t i = 0; i < count; i++) {
         if (o + 2 > n) return false;
         uint8_t kindByte = p[o++];
@@ -223,6 +220,92 @@ inline bool decodeItems(const uint8_t* p, size_t n, uint8_t& sequence, std::vect
         (isSetting ? settings : values).push_back(item);
     }
     return true;
+}
+
+inline bool decodeItems(const uint8_t* p, size_t n, uint8_t& sequence, std::vector<Item>& settings, std::vector<Item>& values) {
+    settings.clear();
+    values.clear();
+    if (!p || n < 2) return false;
+    sequence = p[0];
+    return parseItems(p, n, 2, p[1], settings, values);
+}
+
+// CMD_SET_SCRIPT_DATA -------------------------------------------------------------------------
+// [kind] [sequence] [part] [parts] [count], then the items as above. A list of settings or values
+// that does not fit into one packet goes out in up to DATA_PARTS packets; the receiver applies the
+// list when it has every part of one sequence. Items are never cut: each one is whole in one part.
+
+enum DataKind : uint8_t { DATA_SETTINGS = 0, DATA_VALUES = 1 };
+
+struct DataPart {
+    uint8_t kind = 0;
+    uint8_t sequence = 0;
+    uint8_t part = 0;
+    uint8_t parts = 0;
+    std::vector<Item> items;
+};
+
+inline bool sameItems(const std::vector<Item>& a, const std::vector<Item>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) {
+        if (a[i].kind != b[i].kind || a[i].name != b[i].name || a[i].number != b[i].number || a[i].text != b[i].text) return false;
+    }
+    return true;
+}
+
+// Packs the non-nil items into packets of at most VALUES_MAX bytes. An empty list is one packet
+// with no items, so the receiver learns that there is nothing. `dropped` counts the items that did
+// not fit into DATA_PARTS packets (or have no name).
+inline void encodeDataParts(uint8_t kind, uint8_t sequence, const std::vector<Item>& items,
+                            std::vector<std::vector<uint8_t>>& packets, size_t& dropped) {
+    dropped = 0;
+    packets.clear();
+    std::vector<uint8_t> current(DATA_HEADER, 0);
+    uint8_t count = 0;
+    auto finish = [&]() {
+        current[4] = count;
+        packets.push_back(current);
+        current.assign(DATA_HEADER, 0);
+        count = 0;
+    };
+    for (const Item& item : items) {
+        size_t size = itemSize(item);
+        if (size == 0) continue;  // nil: not sent
+        if (item.name.length() == 0) {
+            dropped++;
+            continue;
+        }
+        if (current.size() + size > VALUES_MAX) {
+            if (packets.size() + 1 >= DATA_PARTS) {
+                dropped++;
+                continue;
+            }
+            finish();
+        }
+        uint8_t tmp[2 + 24 + 1 + 80];
+        size_t len = putItem(item, kind == DATA_SETTINGS, tmp);
+        current.insert(current.end(), tmp, tmp + len);
+        count++;
+    }
+    finish();
+    for (size_t i = 0; i < packets.size(); i++) {
+        packets[i][0] = kind;
+        packets[i][1] = sequence;
+        packets[i][2] = (uint8_t)i;
+        packets[i][3] = (uint8_t)packets.size();
+    }
+}
+
+inline bool decodeDataPart(const uint8_t* p, size_t n, DataPart& out) {
+    out.items.clear();
+    if (!p || n < DATA_HEADER) return false;
+    out.kind = p[0];
+    out.sequence = p[1];
+    out.part = p[2];
+    out.parts = p[3];
+    if (out.kind > DATA_VALUES || out.parts == 0 || out.parts > DATA_PARTS || out.part >= out.parts) return false;
+    std::vector<Item> other;
+    return parseItems(p, n, DATA_HEADER, p[4], out.kind == DATA_SETTINGS ? out.items : other, out.kind == DATA_SETTINGS ? other : out.items);
 }
 
 // CMD_SCRIPT_STATUS ---------------------------------------------------------------------------

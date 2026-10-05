@@ -153,7 +153,15 @@ enum HyperBusCommand {
     CMD_SET_SCRIPT_VALUES = 0x14,
     // Slave -> Master: what the script is doing, on change and every 5 s. Payload: see
     // Script::Wire::Status in ScriptWire.h.
-    CMD_SCRIPT_STATUS = 0x15
+    CMD_SCRIPT_STATUS = 0x15,
+    // Master -> Slave, Slaves 0.3.001 and later: the settings or the values the script reads, in as
+    // many packets as they need. CMD_SET_SCRIPT_VALUES holds at most 240 bytes for both together, which
+    // a plugin with many settings overflows (the rest was left out). Payload: [kind: 0 settings,
+    // 1 values] [sequence] [part] [parts] [count], then the items as in CMD_SET_SCRIPT_VALUES (see
+    // Script::Wire in ScriptWire.h). A kind is applied when all its parts of one sequence are there.
+    // Settings are sent on change and every 5 s, values on change and every 2 s. The Master sends this
+    // only to a Slave that reports 0.3.001 or later, an older one gets CMD_SET_SCRIPT_VALUES.
+    CMD_SET_SCRIPT_DATA = 0x16
 };
 
 // Bytes per pixel in a CMD_SET_LEDS payload (r, g, b, w, w2). CMD_SET_LEDS_CHUNK carries a
@@ -214,6 +222,8 @@ enum HyperBusCommand {
 #define HYPERBUS_SCRIPT_CHUNK_DATA 224
 #define HYPERBUS_SCRIPT_MAX_BYTES 8192
 #define HYPERBUS_SCRIPT_VALUES_MAX 240
+#define HYPERBUS_SCRIPT_DATA_HEADER 5
+#define HYPERBUS_SCRIPT_DATA_PARTS 8
 #define HYPERBUS_SCRIPT_STATUS_MAX 80
 
 // Which effects a Slave can render on its own is decided by EffectEngine::canRender() alone.

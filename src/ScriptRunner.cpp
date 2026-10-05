@@ -88,6 +88,21 @@ void ScriptRunnerClass::onChunk(const uint8_t* payload, size_t length) {
     xSemaphoreGiveRecursive(_lock);
 }
 
+// One packet of CMD_SET_SCRIPT_DATA: copied only, decoded in service().
+void ScriptRunnerClass::onData(const uint8_t* payload, size_t length) {
+    if (length < Script::Wire::DATA_HEADER || length > Script::Wire::VALUES_MAX) return;
+    xSemaphoreTakeRecursive(_lock, portMAX_DELAY);
+    if (_dataCount == DATA_RING) {  // full: the oldest goes
+        _dataHead = (_dataHead + 1) % DATA_RING;
+        _dataCount--;
+    }
+    uint8_t slot = (_dataHead + _dataCount) % DATA_RING;
+    memcpy(_dataRing[slot], payload, length);
+    _dataRingLen[slot] = (uint16_t)length;
+    _dataCount++;
+    xSemaphoreGiveRecursive(_lock);
+}
+
 void ScriptRunnerClass::onValues(const uint8_t* payload, size_t length) {
     if (length < 2 || length > Script::Wire::VALUES_MAX) return;
     xSemaphoreTakeRecursive(_lock, portMAX_DELAY);
@@ -115,6 +130,7 @@ void ScriptRunnerClass::service() {
         _task.unload();
         _task.stop();
         _valuesSequenceApplied = 0xFF;
+        resetData();
         _startFailed = false;
         return;
     }
@@ -159,6 +175,7 @@ void ScriptRunnerClass::service() {
     xSemaphoreGiveRecursive(_lock);
 
     if (handText) _task.setScript(text.data(), text.size(), config.crc);
+    if (takeData()) _task.setValues(_kept[Script::Wire::DATA_SETTINGS], _kept[Script::Wire::DATA_VALUES]);
     if (valuesNew) {
         std::vector<Script::Item> settings, vals;
         uint8_t sequence = 0;
@@ -170,6 +187,59 @@ void ScriptRunnerClass::service() {
         }
     }
     _task.setOn((config.flags & Script::Wire::FLAG_ON) != 0);
+}
+
+// What was collected of the settings and values is forgotten: the Master is gone or let go, and
+// what it sends next may be a different script's.
+void ScriptRunnerClass::resetData() {
+    xSemaphoreTakeRecursive(_lock, portMAX_DELAY);
+    _dataHead = 0;
+    _dataCount = 0;
+    xSemaphoreGiveRecursive(_lock);
+    for (int k = 0; k < 2; k++) {
+        _assembly[k] = DataAssembly();
+        _dataApplied[k] = 0xFF;
+        _kept[k].clear();
+    }
+}
+
+// Reads the CMD_SET_SCRIPT_DATA packets that came in. True when a settings or a values list is
+// complete and new, so the script has to be told.
+bool ScriptRunnerClass::takeData() {
+    bool news = false;
+    for (;;) {
+        uint8_t packet[Script::Wire::VALUES_MAX];
+        uint16_t length = 0;
+        xSemaphoreTakeRecursive(_lock, portMAX_DELAY);
+        if (_dataCount > 0) {
+            length = _dataRingLen[_dataHead];
+            memcpy(packet, _dataRing[_dataHead], length);
+            _dataHead = (_dataHead + 1) % DATA_RING;
+            _dataCount--;
+        }
+        xSemaphoreGiveRecursive(_lock);
+        if (length == 0) break;
+        Script::Wire::DataPart part;
+        if (!Script::Wire::decodeDataPart(packet, length, part)) continue;
+        DataAssembly& a = _assembly[part.kind];
+        if (part.sequence == _dataApplied[part.kind]) continue;  // the repeat of what the script has
+        if (a.sequence != part.sequence || a.parts != part.parts) {
+            a = DataAssembly();  // a newer list begins: what was collected of the old one is useless
+            a.sequence = part.sequence;
+            a.parts = part.parts;
+        }
+        a.part[part.part] = part.items;
+        a.have |= (uint16_t)(1u << part.part);
+        if (a.have == (uint16_t)((1u << a.parts) - 1)) {
+            std::vector<Script::Item> list;
+            for (uint8_t i = 0; i < a.parts; i++) list.insert(list.end(), a.part[i].begin(), a.part[i].end());
+            _kept[part.kind].swap(list);
+            _dataApplied[part.kind] = a.sequence;
+            a = DataAssembly();
+            news = true;
+        }
+    }
+    return news;
 }
 
 bool ScriptRunnerClass::takeFrame(uint8_t* rgb, size_t bytes, uint16_t& width, uint16_t& height) {

@@ -1383,6 +1383,9 @@ void handleUplinkPacket(const HyperBusPacket& packet) {
         else if (packet.command == CMD_SET_SCRIPT_VALUES) {
             ScriptRunner.onValues(packet.payload, packet.length);
         }
+        else if (packet.command == CMD_SET_SCRIPT_DATA) {
+            ScriptRunner.onData(packet.payload, packet.length);
+        }
         else if (packet.command == CMD_UPDATE_KEY) {
             if (packet.targetId == myId && packet.senderId == HYPERBUS_MASTER_ID &&
                 packet.length == UpdateSeal::PUBLIC_LEN && !pendingKeyOffer) {
