@@ -39,10 +39,20 @@
 // Hardware UART Pins for the Waveshare ESP32-S3-Zero. UPLINK cross-wires to
 // the Master's own GPIO16/17 pair (see include/Config.h in the root project);
 // DOWNLINK is free for daisy-chaining a further Slave.
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+// ESP32-C6: the uplink uses the pins the boards label RX and TX (GPIO17 and GPIO16, UART0's own
+// pins, so the boot messages of the ROM go to the Master's RX line and not onto its TX line), the
+// downlink GPIO18 and GPIO19. The Master's TX therefore goes to GPIO17 here, not to GPIO16 as on the S3.
+#define UPLINK_RX 17
+#define UPLINK_TX 16
+#define DOWNLINK_RX 18
+#define DOWNLINK_TX 19
+#else
 #define UPLINK_RX 16
 #define UPLINK_TX 17
 #define DOWNLINK_RX 18
 #define DOWNLINK_TX 38
+#endif
 
 // HyperBus Instances
 HyperBusClass busUp(Serial1);
@@ -112,13 +122,13 @@ void initLEDs() {
                 panelBrightnessApplied = 255;
                 break;
             case TYPE_WS2812_RGB:
-                strip = new BusDigitalRgb<NeoGrbFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+                strip = new BusDigitalRgb<NeoGrbFeature, HyperNeo800Method>(ledCount, ledPin); break;
             case TYPE_SK6812_RGBW:
-                strip = new BusDigitalRgbw<NeoGrbwFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+                strip = new BusDigitalRgbw<NeoGrbwFeature, HyperNeo800Method>(ledCount, ledPin); break;
             case TYPE_TM1814:
-                strip = new BusDigitalRgbw<NeoWrgbTm1814Feature, Neo800KbpsMethod>(ledCount, ledPin); break;
+                strip = new BusDigitalRgbw<NeoWrgbTm1814Feature, HyperNeo800Method>(ledCount, ledPin); break;
             case TYPE_400KHZ:
-                strip = new BusDigitalRgb<NeoGrbFeature, Neo400KbpsMethod>(ledCount, ledPin); break;
+                strip = new BusDigitalRgb<NeoGrbFeature, HyperNeo400Method>(ledCount, ledPin); break;
             case TYPE_APA102:
                 strip = new BusDigitalSpiRgb<DotStarBgrFeature, DotStarSpiMethod>(ledCount, ledPin2, ledPin); break;
             case TYPE_LPD8806:
@@ -126,19 +136,19 @@ void initLEDs() {
             case TYPE_TM1914:
                 // TM1914 requires a chip-specific mode-select settings header before the pixel
                 // data (handled by NeoGrbTm1914Feature) - a plain NeoGrbFeature frame omits it.
-                strip = new BusDigitalRgb<NeoGrbTm1914Feature, Neo800KbpsMethod>(ledCount, ledPin); break;
+                strip = new BusDigitalRgb<NeoGrbTm1914Feature, HyperNeo800Method>(ledCount, ledPin); break;
             case TYPE_TM1829:
             case TYPE_UCS8903:
             case TYPE_APA106:
             case TYPE_WS2811_W:
             case TYPE_WS281X_WWA:
-                strip = new BusDigitalRgb<NeoGrbFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+                strip = new BusDigitalRgb<NeoGrbFeature, HyperNeo800Method>(ledCount, ledPin); break;
             case TYPE_FW1906:
               case TYPE_UCS8904:
-                  strip = new BusDigitalRgbw<NeoGrbwFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+                  strip = new BusDigitalRgbw<NeoGrbwFeature, HyperNeo800Method>(ledCount, ledPin); break;
               case TYPE_WS2805:
               case TYPE_SM16825:
-                  strip = new BusDigitalRgbww<NeoGrbwcFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+                  strip = new BusDigitalRgbww<NeoGrbwcFeature, HyperNeo800Method>(ledCount, ledPin); break;
             case TYPE_WS2801:
                 // WS2801 is plain RGB-over-SPI with no start/end frame - NOT DotStar-protocol-compatible.
                 strip = new BusDigitalSpiRgb<NeoRgbFeature, Ws2801SpiMethod>(ledCount, ledPin2, ledPin); break;
@@ -163,7 +173,7 @@ void initLEDs() {
             case TYPE_ANALOG_5CH:
                 strip = new BusPwm(ledCount, 5, ledPin, ledPin2, 255, 255, 255); break;
             default:
-                strip = new BusDigitalRgb<NeoGrbFeature, Neo800KbpsMethod>(ledCount, ledPin); break;
+                strip = new BusDigitalRgb<NeoGrbFeature, HyperNeo800Method>(ledCount, ledPin); break;
         }
         
         if (strip) {
@@ -1118,7 +1128,10 @@ static volatile bool pendingShow = false;
 static void sendPong(bool wireless) {
     // PONG Payload: [LED Count L] [LED Count H] [Version Length] [Version String...]
     //               [ledType] [matrixW L] [matrixW H] [matrixH L] [matrixH H] [shiftDriver]
-    //               [Name...]
+    //               [chip] [Name...]
+    //
+    // [chip] (HYPERLED_CHIP_ID, one byte) was added in 0.3.006: the Master offers the pins of that chip
+    // in the web interface. The Master reads it only from a Slave that reports 0.3.006 or later.
     //
     // The six configuration bytes were added in 0.2.001. Everything a Slave was told is stored
     // here and nowhere else, so without reporting it back the Master could not tell a HUB75
@@ -1127,7 +1140,7 @@ static void sendPong(bool wireless) {
     // off the version string it parses first, so older Slaves that stop after the version are
     // still read correctly.
     uint8_t verLen = slaveVersion.length();
-    uint16_t len = 2 + 1 + verLen + 6 + slaveName.length();
+    uint16_t len = 2 + 1 + verLen + 6 + 1 + slaveName.length();
     uint8_t* payload = (uint8_t*)malloc(len);
     if (!payload) return;
     payload[0] = ledCount & 0xFF;
@@ -1141,7 +1154,8 @@ static void sendPong(bool wireless) {
     payload[o + 3] = matrixHeight & 0xFF;
     payload[o + 4] = (matrixHeight >> 8) & 0xFF;
     payload[o + 5] = hub75ShiftDriver;
-    memcpy(&payload[o + 6], slaveName.c_str(), slaveName.length());
+    payload[o + 6] = (uint8_t)HYPERLED_CHIP_ID;
+    memcpy(&payload[o + 7], slaveName.c_str(), slaveName.length());
 
     if (wireless) espBus.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_PONG, payload, len);
     else busUp.sendPacket(HYPERBUS_MASTER_ID, myId, CMD_PONG, payload, len);
@@ -1793,7 +1807,7 @@ void loop() {
         }
     }
 
-    if (transportMode == 0 && wifiCandidateTime > 0 && millis() - wifiCandidateTime > 3000) {
+    if (transportMode == 0 && wifiCandidateTime > 0 && (long)(millis() - wifiCandidateTime) > 3000) {
         prefs.begin("hyperled_slave", false);
         prefs.putUInt("transport", 2);
         prefs.end();
@@ -1819,7 +1833,7 @@ void loop() {
     // so a brief pause on the Master - reinitialising its LED bus when segments change, for
     // instance - is enough to look like a dead UART. 5s still catches a genuinely stuck
     // peripheral quickly, and matches what the wireless transport treats as losing the Master.
-    if (transportMode == 1 && lastUartPacket > 0 && millis() - lastUartPacket > 5000) {
+    if (transportMode == 1 && lastUartPacket > 0 && (long)(millis() - lastUartPacket) > 5000) {
         Serial.println("UART Hardware Lockup detected! Restarting peripheral...");
         busUp.begin(115200, UPLINK_RX, UPLINK_TX);
         gpio_pullup_en((gpio_num_t)UPLINK_RX); // MUST set pullup AFTER begin!
@@ -1830,8 +1844,12 @@ void loop() {
     // few seconds of silence means the link is really gone rather than just a dropped
     // packet. Right after boot lastMasterContact is still 0 - that counts as disconnected
     // too, which is what you want to see on a Slave nobody is talking to.
+    //
+    // lastMasterContact is written by the radio task (handleUplinkPacket): the SIGNED difference, because a packet
+    // that arrives between reading the clock here and the subtraction would otherwise give a "49 days of silence"
+    // and flash the red LED (seen on the single-core ESP32-C6 every half minute).
     SlaveLedCondition cond;
-    if (lastMasterContact == 0 || millis() - lastMasterContact > 5000) {
+    if (lastMasterContact == 0 || (long)(millis() - lastMasterContact) > 5000) {
         cond = SLED_DISCONNECTED;
     } else if (myId == 254) {
         cond = SLED_UNCONFIGURED;

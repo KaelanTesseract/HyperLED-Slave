@@ -20,7 +20,7 @@
 
 #include <Arduino.h>
 
-#define HYPERLED_VERSION "0.3.005"
+#define HYPERLED_VERSION "0.3.006"
 
 // The chip this firmware is built for (HYPERLED_CHIP, HYPERLED_CHIP_ID) lives in ChipId.h.
 #include "ChipId.h"
@@ -95,6 +95,26 @@
 // free too, so a HUB75 Slave keeps full use of both wired HyperBus ports.
 // Keep in sync with the Master's own include/Config.h - same board, same
 // pins, but a separate copy (not a shared header).
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+// ESP32-C6 (provisional, not tried on a panel yet). Chosen so that it fits the ESP32-C6 Super Mini, which
+// breaks out GPIO0-9 and 12-23 (not 10 and 11): GPIO12/13 are the native USB, GPIO8 is the onboard RGB LED,
+// GPIO9 the BOOT button, GPIO16/17 are the HyperBus uplink and GPIO18/19 the downlink (main.cpp). The 14
+// panel signals take the rest, including the strapping pins 4, 5 and 15 (outputs after boot only).
+#define HUB75_PIN_R1 0
+#define HUB75_PIN_G1 1
+#define HUB75_PIN_B1 2
+#define HUB75_PIN_R2 3
+#define HUB75_PIN_G2 4
+#define HUB75_PIN_B2 5
+#define HUB75_PIN_A 6
+#define HUB75_PIN_B 7
+#define HUB75_PIN_C 14
+#define HUB75_PIN_D 15
+#define HUB75_PIN_E 20
+#define HUB75_PIN_CLK 21
+#define HUB75_PIN_LAT 22
+#define HUB75_PIN_OE 23
+#else
 #define HUB75_PIN_R1 1
 #define HUB75_PIN_G1 2
 #define HUB75_PIN_B1 4
@@ -109,13 +129,20 @@
 #define HUB75_PIN_CLK 13
 #define HUB75_PIN_LAT 14
 #define HUB75_PIN_OE 15
+#endif
 
 // Onboard WS2812 status LED of the Waveshare ESP32-S3-Zero. Driven by StatusLedManager
 // through NeoPixelBus on RMT channel 0 (the main LED bus uses channel 1), NOT through the
 // Arduino core's rgbLedWrite(): that path is disabled via ESP32_ARDUINO_NO_RGB_BUILTIN
 // because it pulls in the next-gen RMT driver, which conflicts with NeoPixelBus and
 // bootloops the device (see platformio.ini).
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+// ESP32-C6 boards (DevKitC-1, Waveshare ESP32-C6-Zero) carry the WS2812 on GPIO8. It is driven through
+// the Arduino core's rgbLedWrite(), since NeoPixelBus has no RMT driver for this chip.
+#define STATUS_LED_PIN 8
+#else
 #define STATUS_LED_PIN 21
+#endif
 
 // Status LED settings, pushed down from the Master via CMD_SET_STATUS_LED and persisted
 // here so the Slave keeps them across a reboot without needing the Master.
@@ -136,7 +163,11 @@
 // --- Hardware Settings ---
 
 // --- Default Values ---
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+#define DEFAULT_LED_PIN 2   // GPIO4 is a strapping pin on the C6
+#else
 #define DEFAULT_LED_PIN 4
+#endif
 #define DEFAULT_LED_COUNT 30
 #define DEFAULT_LED_TYPE 0 // WS281x
 

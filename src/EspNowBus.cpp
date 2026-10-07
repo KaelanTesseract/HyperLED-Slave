@@ -88,7 +88,9 @@ void EspNowBusClass::loop() {
         // the reconfiguration that follows rediscovery. Matching the Master's own tolerance
         // keeps the two sides symmetric: a real channel change is still caught, a transient one
         // is ridden out.
-        if (millis() - _lastPingReceived > MASTER_LOST_TIMEOUT_MS) {
+        // _lastPingReceived is written by the radio task: compare the signed difference (see main.cpp, the
+        // status LED), or a PING that arrives between reading the clock and the subtraction looks like 49 days of silence.
+        if ((long)(millis() - _lastPingReceived) > (long)MASTER_LOST_TIMEOUT_MS) {
             Serial.println("EspNowBus: lost the Master, scanning channels again");
             _locked = false;
             _lastPingReceived = millis();
@@ -97,7 +99,7 @@ void EspNowBusClass::loop() {
     }
 
     // If we haven't received a PING in 500ms, switch channel
-    if (millis() - _lastPingReceived > 500) {
+    if ((long)(millis() - _lastPingReceived) > 500) {
         _currentChannel++;
         if (_currentChannel > 13) _currentChannel = 1;
 

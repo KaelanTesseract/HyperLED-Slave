@@ -28,7 +28,14 @@ StatusLedManagerClass StatusLedManager;
 // NeoRgbFeature, not the usual NeoGrbFeature: the onboard LED of this board expects plain
 // RGB byte order. With GRB the red and green channels come out swapped (blue stays correct),
 // which is exactly how a wrong order shows up here - so don't "fix" this back to GRB.
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+// The C6 has no NeoPixelBus RMT driver; the Arduino core's rgbLedWrite() sets the colour. Nothing else
+// on this chip uses the core's RMT in a way that conflicts with it (the strip bus, BusRmt, is built on
+// the same API).
+static bool _statusStrip = false;
+#else
 static NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt0Ws2812xMethod>* _statusStrip = nullptr;
+#endif
 
 static const uint32_t COLOR_UNCONFIGURED = 0x0000FF; // blue
 static const uint32_t COLOR_DISCONNECTED = 0xFF0000; // red
@@ -43,8 +50,12 @@ void StatusLedManagerClass::begin() {
     _brightness = prefs.getUChar(PREF_STATUSLED_BRI, 40);
     prefs.end();
 
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+    _statusStrip = true;
+#else
     _statusStrip = new NeoPixelBus<NeoRgbFeature, NeoEsp32Rmt0Ws2812xMethod>(1, STATUS_LED_PIN);
     _statusStrip->Begin();
+#endif
     _dirty = true;
     render();
 }
@@ -82,8 +93,12 @@ void StatusLedManagerClass::render() {
     uint8_t g = ((color >> 8) & 0xFF) * bri / 255;
     uint8_t b = (color & 0xFF) * bri / 255;
 
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+    rgbLedWrite(STATUS_LED_PIN, r, g, b);
+#else
     _statusStrip->SetPixelColor(0, RgbColor(r, g, b));
     _statusStrip->Show();
+#endif
 }
 
 void StatusLedManagerClass::setState(bool on, uint32_t color, uint8_t brightness) {

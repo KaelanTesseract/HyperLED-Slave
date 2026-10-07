@@ -20,6 +20,7 @@
 
 #include <Arduino.h>
 #include <NeoPixelBus.h>
+#include "NeoC6RmtMethod.h"
 #include <hub75.h>
 #include <esp_heap_caps.h>
 #include <cmath>

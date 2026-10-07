@@ -40,7 +40,7 @@ Digitale LEDs (WS281x-Familie, SK6812 und weitere), SPI-LEDs (APA102 und weitere
 
 ## Hardware
 
-Entwickelt und getestet auf dem **ESP32-S3** (Waveshare ESP32-S3-Zero). Welche anderen ESP32-Chips in Frage kommen, steht im [Wiki des Hauptprojekts](https://github.com/KaelanTesseract/HyperLED/blob/main/docs/de/03_Hardware_Setup.md).
+Entwickelt und getestet auf dem **ESP32-S3** (Waveshare ESP32-S3-Zero). Zusätzlich gibt es eine Umgebung für den **ESP32-C6** (getestet auf dem ESP32-C6 Super Mini, noch im Test): `pio run -e esp32-c6 -t upload`. Beim C6 sind die Pins anders (Datenpin Standard GPIO 2, Kabel-Uplink RX GPIO 17 und TX GPIO 16, Statuslicht GPIO 8); alles dazu und welche anderen ESP32-Chips in Frage kommen, steht in der [Hardware-Doku des Hauptprojekts](https://github.com/KaelanTesseract/HyperLED/blob/main/docs/de/03_Hardware_Setup.md).
 
 Feste Pins (in `include/Config.h` dokumentiert):
 
@@ -67,7 +67,7 @@ pio run -t upload      # Firmware auf den ESP32 schreiben
 ```
 
 **Danach**
-1. Slave mit Strom versorgen. Per Kabel: Master TX 17 an Slave RX 16, dazu gemeinsame Masse. Per Funk: nichts weiter zu tun – der Slave sucht den Master selbst über die WLAN-Kanäle.
+1. Slave mit Strom versorgen. Per Kabel: Master TX 17 an Slave RX 16 (beim ESP32-C6: an GPIO 17, Master RX 16 an GPIO 16), dazu gemeinsame Masse. Per Funk: nichts weiter zu tun – der Slave sucht den Master selbst über die WLAN-Kanäle.
 2. In der Weboberfläche des Masters unter *Geräte → Verbundene Geräte* erscheint der neue Slave.
 3. Dort LED-Typ, Anzahl bzw. Panelgröße und Namen einstellen und speichern. Anschließend lässt sich dem Slave ein Segment zuweisen.
 
